@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ml-experiments · match viewer</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #16181d; --muted: #6b7280;
+    --line: #e3e6ea; --accent: #3b6fd4; --board: #bcae9e; --cell: #cdc0b4;
+    --p0: #3b6fd4; --p1: #d4643b; --p2: #3ba05a; --p3: #9b59b6;
+    --p4: #d4a13b; --p5: #43b3c4; --p6: #c44380; --p7: #6b7280;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --panel: #1c1f25; --ink: #e8eaed; --muted: #9aa3af;
+      --line: #2b2f37; --accent: #6d9bee; --board: #4a4239; --cell: #35302b;
+      --p0: #6d9bee; --p1: #ee8a6d; --p2: #5cc47e; --p3: #b57ad0;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 18px 24px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  main {
+    display: grid; grid-template-columns: 320px minmax(0, 1fr);
+    gap: 22px; padding: 22px 24px; align-items: start;
+  }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px;
+  }
+  .panel h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--muted); margin: 0 0 12px; font-weight: 600;
+  }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+  label:first-of-type { margin-top: 0; }
+  select, input, button {
+    font: inherit; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; width: 100%;
+  }
+  button {
+    background: var(--accent); color: #fff; border-color: transparent;
+    font-weight: 600; cursor: pointer;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.08); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--ink); border-color: var(--line); font-weight: 500; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  .row > .fixed { flex: 0 0 auto; width: auto; padding-inline: 12px; }
+  .seat { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; flex: 0 0 auto; }
+  .seat select { flex: 1; }
+  #board-wrap { display: flex; justify-content: center; padding: 8px 0 16px; }
+  canvas { max-width: 100%; height: auto; border-radius: 10px; }
+  .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .controls .fixed { flex: 0 0 auto; width: auto; padding-inline: 12px; }
+  #scrub { flex: 1; padding: 0; }
+  .stats { display: flex; gap: 10px; flex-wrap: wrap; }
+  .stat {
+    flex: 1 1 130px; border: 1px solid var(--line); border-radius: 8px;
+    padding: 9px 11px; background: var(--bg);
+  }
+  .stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat .v { font-size: 19px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat.win { border-color: var(--accent); }
+  #status { color: var(--muted); font-size: 13px; min-height: 20px; }
+  #status.error { color: #d4643b; }
+  .legend { font-size: 12px; color: var(--muted); margin-top: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>match viewer</h1>
+  <span class="sub">pick a game, assign models to seats, watch them play</span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>setup</h2>
+    <label for="game">game</label>
+    <select id="game"></select>
+
+    <div id="players-wrap" hidden>
+      <label for="players">players</label>
+      <select id="players"></select>
+    </div>
+
+    <div id="board-size-wrap" hidden>
+      <label for="board">board size</label>
+      <select id="board">
+        <option value="8">8 x 8</option>
+        <option value="12" selected>12 x 12</option>
+        <option value="16">16 x 16</option>
+        <option value="20">20 x 20</option>
+      </select>
+    </div>
+
+    <label>seats</label>
+    <div id="seats"></div>
+
+    <label for="seed">seed</label>
+    <div class="row">
+      <input id="seed" type="number" value="1" min="0">
+      <button class="ghost fixed" id="reseed" title="random seed">shuffle</button>
+    </div>
+
+    <label>&nbsp;</label>
+    <button id="run">run match</button>
+    <div class="legend">Same seed and same models always replay the same match.</div>
+  </section>
+
+  <section class="panel">
+    <h2>playback</h2>
+    <div class="controls">
+      <button class="ghost fixed" id="back" disabled>&#9664;</button>
+      <button class="fixed" id="play" disabled>play</button>
+      <button class="ghost fixed" id="fwd" disabled>&#9654;</button>
+      <input id="scrub" type="range" min="0" max="0" value="0" disabled>
+      <select id="speed" class="fixed" style="width:auto">
+        <option value="0.25">0.25x</option>
+        <option value="1" selected>1x</option>
+        <option value="4">4x</option>
+        <option value="16">16x</option>
+        <option value="64">64x</option>
+      </select>
+    </div>
+    <div id="board-wrap"><canvas id="board-canvas" width="520" height="520"></canvas></div>
+    <div class="stats" id="stats"></div>
+    <div id="status">Choose models and run a match.</div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const canvas = $("board-canvas");
+const ctx = canvas.getContext("2d");
+const PALETTE = ["--p0","--p1","--p2","--p3","--p4","--p5","--p6","--p7"]
+  .map(v => getComputedStyle(document.documentElement).getPropertyValue(v).trim() || "#888");
+
+let games = [], agentNames = [], match = null, frame = 0, timer = null;
+
+// ---- setup -------------------------------------------------------------
+
+async function init() {
+  games = await (await fetch("/api/games")).json();
+  $("game").innerHTML = games.map(g => `<option value="${g.name}">${g.name}</option>`).join("");
+  $("game").onchange = onGameChange;
+  $("players").onchange = buildSeats;
+  $("reseed").onclick = () => { $("seed").value = Math.floor(Math.random() * 100000); };
+  $("run").onclick = runMatch;
+  $("play").onclick = togglePlay;
+  $("back").onclick = () => { pause(); showFrame(frame - 1); };
+  $("fwd").onclick = () => { pause(); showFrame(frame + 1); };
+  $("scrub").oninput = (e) => { pause(); showFrame(+e.target.value); };
+  await onGameChange();
+}
+
+function currentGame() {
+  return games.find(g => g.name === $("game").value);
+}
+
+async function onGameChange() {
+  const game = currentGame();
+  agentNames = await (await fetch(`/api/agents?game=${game.name}`)).json();
+
+  $("players-wrap").hidden = !game.variable_players;
+  $("board-size-wrap").hidden = !game.variable_players;
+  if (game.variable_players) {
+    const opts = [];
+    for (let n = 1; n <= game.max_players; n++) opts.push(n);
+    $("players").innerHTML = opts.map(n =>
+      `<option value="${n}"${n === 2 ? " selected" : ""}>${n}</option>`).join("");
+  }
+  buildSeats();
+  clearMatch();
+}
+
+function seatCount() {
+  const game = currentGame();
+  return game.variable_players ? +$("players").value : game.default_players;
+}
+
+function buildSeats() {
+  const n = seatCount();
+  $("seats").innerHTML = "";
+  for (let i = 0; i < n; i++) {
+    const row = document.createElement("div");
+    row.className = "seat";
+    // Prefer a trained model over the random baseline when one exists.
+    const preferred = agentNames.find(a => a !== "random" && a !== "first") || "random";
+    const pick = i === 0 ? preferred : (agentNames.includes("random") ? "random" : preferred);
+    row.innerHTML = `
+      <span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>
+      <select data-seat="${i}">
+        ${agentNames.map(a => `<option${a === pick ? " selected" : ""}>${a}</option>`).join("")}
+      </select>`;
+    $("seats").appendChild(row);
+  }
+}
+
+function clearMatch() {
+  pause();
+  match = null;
+  ["back","play","fwd","scrub"].forEach(id => $(id).disabled = true);
+  $("stats").innerHTML = "";
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+// ---- running -----------------------------------------------------------
+
+async function runMatch() {
+  const picks = [...document.querySelectorAll("#seats select")].map(s => s.value);
+  $("run").disabled = true;
+  $("status").className = "";
+  $("status").textContent = "running…";
+  try {
+    const body = {
+      game: $("game").value,
+      agents: picks,
+      seed: +$("seed").value,
+      board: +$("board").value,
+    };
+    const res = await fetch("/api/play", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    match = data;
+    $("scrub").max = match.frames.length - 1;
+    ["back","play","fwd","scrub"].forEach(id => $(id).disabled = false);
+    showFrame(0);
+    renderStats();
+    $("status").textContent =
+      `${match.steps} steps` + (match.truncated ? " (frames sampled for display)" : "");
+  } catch (err) {
+    $("status").className = "error";
+    $("status").textContent = String(err.message || err);
+  } finally {
+    $("run").disabled = false;
+  }
+}
+
+function renderStats() {
+  $("stats").innerHTML = match.agents.map((name, i) => {
+    const won = match.winners.includes(i);
+    const label = match.agents.length > 1 ? `seat ${i} · ${name}` : name;
+    return `<div class="stat${won ? " win" : ""}">
+      <div class="k">${label}${won ? " · winner" : ""}</div>
+      <div class="v" style="color:${PALETTE[i % PALETTE.length]}">
+        ${match.scores[i].toFixed(match.game === "snake" ? 2 : 0)}</div>
+    </div>`;
+  }).join("");
+}
+
+// ---- playback ----------------------------------------------------------
+
+function togglePlay() { timer ? pause() : play(); }
+
+function play() {
+  if (!match) return;
+  if (frame >= match.frames.length - 1) frame = 0;
+  $("play").textContent = "pause";
+  const tick = () => {
+    if (frame >= match.frames.length - 1) return pause();
+    showFrame(frame + 1);
+    timer = setTimeout(tick, 120 / +$("speed").value);
+  };
+  timer = setTimeout(tick, 120 / +$("speed").value);
+}
+
+function pause() {
+  clearTimeout(timer);
+  timer = null;
+  $("play").textContent = "play";
+}
+
+function showFrame(index) {
+  if (!match) return;
+  frame = Math.max(0, Math.min(index, match.frames.length - 1));
+  $("scrub").value = frame;
+  draw(match.frames[frame]);
+}
+
+// ---- drawing -----------------------------------------------------------
+
+const TILE_COLORS = {
+  2:"#eee4da", 4:"#ede0c8", 8:"#f2b179", 16:"#f59563", 32:"#f67c5f",
+  64:"#f65e3b", 128:"#edcf72", 256:"#edcc61", 512:"#edc850",
+  1024:"#edc53f", 2048:"#edc22e", 4096:"#3c3a32", 8192:"#3c3a32",
+};
+
+function draw(f) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (f.kind === "grid2048") drawGrid2048(f);
+  else if (f.kind === "snake") drawSnake(f);
+}
+
+function drawGrid2048(f) {
+  const n = f.size, pad = 8, size = canvas.width;
+  const cell = (size - pad * (n + 1)) / n;
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--board");
+  roundRect(0, 0, size, size, 10); ctx.fill();
+
+  for (let i = 0; i < n * n; i++) {
+    const r = Math.floor(i / n), c = i % n, v = f.cells[i];
+    const x = pad + c * (cell + pad), y = pad + r * (cell + pad);
+    ctx.fillStyle = v ? (TILE_COLORS[v] || "#3c3a32")
+      : getComputedStyle(document.documentElement).getPropertyValue("--cell");
+    roundRect(x, y, cell, cell, 6); ctx.fill();
+    if (!v) continue;
+    ctx.fillStyle = v <= 4 ? "#776e65" : "#f9f6f2";
+    ctx.font = `600 ${v >= 1024 ? cell * 0.30 : cell * 0.38}px ui-sans-serif, system-ui, sans-serif`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(v, x + cell / 2, y + cell / 2 + 1);
+  }
+}
+
+function drawSnake(f) {
+  const size = canvas.width;
+  const cell = size / Math.max(f.width, f.height);
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--cell");
+  roundRect(0, 0, cell * f.width, cell * f.height, 8); ctx.fill();
+
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--line");
+  ctx.lineWidth = 1;
+  for (let x = 0; x <= f.width; x++) line(x * cell, 0, x * cell, f.height * cell);
+  for (let y = 0; y <= f.height; y++) line(0, y * cell, f.width * cell, y * cell);
+
+  for (const [fx, fy] of f.food) {
+    ctx.fillStyle = "#d4643b";
+    ctx.beginPath();
+    ctx.arc((fx + 0.5) * cell, (fy + 0.5) * cell, cell * 0.26, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  f.snakes.forEach((snake, i) => {
+    const colour = PALETTE[i % PALETTE.length];
+    ctx.globalAlpha = snake.alive ? 1 : 0.22;   // dead snakes fade out
+    snake.body.forEach(([x, y], j) => {
+      ctx.fillStyle = colour;
+      const inset = j === 0 ? cell * 0.06 : cell * 0.14;
+      roundRect(x * cell + inset, y * cell + inset,
+                cell - inset * 2, cell - inset * 2, cell * 0.22);
+      ctx.fill();
+    });
+    if (snake.body.length) {   // mark the head so direction is readable
+      const [hx, hy] = snake.body[0];
+      ctx.fillStyle = "rgba(255,255,255,0.85)";
+      ctx.beginPath();
+      ctx.arc((hx + 0.5) * cell, (hy + 0.5) * cell, cell * 0.12, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  });
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function line(x1, y1, x2, y2) {
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+}
+
+init();
+</script>
+</body>
+</html>
