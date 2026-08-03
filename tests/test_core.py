@@ -78,7 +78,7 @@ class TestAgents(unittest.TestCase):
 
 class TestRegistry(unittest.TestCase):
     def test_games_are_discoverable(self):
-        self.assertEqual(list_games(), ["2048", "snake"])
+        self.assertEqual(list_games(), ["2048", "connect4", "kuhn", "snake"])
 
     def test_baselines_always_available(self):
         self.assertIn("random", list_agents("2048"))

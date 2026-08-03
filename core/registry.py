@@ -14,10 +14,17 @@ MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
 
 
 def _games():
+    from games.connect4 import Connect4Game
     from games.g2048 import Game2048
+    from games.kuhn import KuhnGame
     from games.snake import SnakeGame
 
-    return {"2048": Game2048, "snake": SnakeGame}
+    return {
+        "2048": Game2048,
+        "connect4": Connect4Game,
+        "kuhn": KuhnGame,
+        "snake": SnakeGame,
+    }
 
 
 def list_games() -> list[str]:

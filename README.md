@@ -1,7 +1,7 @@
 # ml-experiments
 
 A small bench for training models to play games and comparing them honestly.
-Two games, two families of model, a head-to-head arena, a browser viewer, and a
+Four games, two families of model, a head-to-head arena, a browser viewer, and a
 notebook. Pure stdlib except numpy/matplotlib/pandas/jupyter in a local venv.
 
 The recurring theme, and the reason the arena and the notebook exist at all:
@@ -32,11 +32,13 @@ the commands below work from any directory. Leave with `deactivate`.
 ```bash
 source setup.bash
 
-python -m unittest discover -s tests -t .        # 55 tests
+python -m unittest discover -s tests -t .        # 106 tests
 
 python -m train.ga 2048 --name ga                # evolve 2048 weights
 python -m train.ga snake --players 2 --name ga   # evolve snake weights
 python -m train.dqn snake --players 2 --name dqn # train a snake DQN
+python -m train.ga connect4 --name ga            # turn-based, terminal reward
+python -m train.dqn kuhn --name dqn              # turn-based, hidden information
 
 python -m core.arena snake ga dqn --games 6000   # compare
 python serve.py                                  # viewer on :8000
@@ -57,13 +59,15 @@ round_robin("snake", ["ga", "dqn", "random"], games=2000)
 | path                        | what it is                                                                       |
 |-----------------------------|----------------------------------------------------------------------------------|
 | `setup.bash`                | sourced environment setup — venv, requirements, `PYTHONPATH`                     |
-| `core/game.py`              | the `Game` interface — N simultaneous players, per-action features, observations |
+| `core/game.py`              | the `Game` interface — simultaneous or turn-based, hidden information, features  |
 | `core/agent.py`             | `Agent` interface, random/first baselines, and the GA-trained `WeightedAgent`    |
 | `core/runner.py`            | plays an episode, optionally recording every frame for replay                    |
 | `core/arena.py`             | head-to-head comparison with seat rotation and Wilson intervals                  |
 | `core/registry.py`          | look up games and trained models by name                                         |
 | `games/g2048.py`            | 2048 (1 player)                                                                  |
 | `games/snake.py`            | Snake (N players, simultaneous)                                                  |
+| `games/connect4.py`         | Connect Four (2 players, turn-based, terminal-only reward)                       |
+| `games/kuhn.py`             | Kuhn poker (2 players, turn-based, hidden information and chance)                |
 | `agents/dqn.py`             | MLP + replay buffer, backward pass written out in numpy                          |
 | `train/ga.py`               | genetic algorithm — works on any game                                            |
 | `train/dqn.py`              | Double DQN — works on any game                                                   |
@@ -111,6 +115,65 @@ That two completely different approaches — seven hand-written features tuned b
 evolution, and a neural network learning its own value function from raw
 observations — land in a dead heat is a real finding about the difficulty of the
 game, not a failure of either method.
+
+**Connect Four — against random**, 2,000 games, seats rotated:
+
+| agent | win rate | 95% CI        |
+|-------|----------|---------------|
+| `ga`  | 97.9%    | 97.2% – 98.4% |
+| `dqn` | 87.3%    | 85.8% – 88.7% |
+
+Head to head the GA wins, and it wins *both* of the two games that exist between
+two deterministic agents — see the section on deterministic matchups above for
+why that is a much weaker claim than 100% sounds.
+
+The gap is not close, and the reason is the reward. Connect Four scores 0 for
+every position until the last move, when it becomes ±1. The GA never has to
+solve that: it only needs a fitness number, and `wins_now` and `blocks_win` hand
+it most of a tactical policy for free. The DQN has to carry one terminal reward
+back across forty plies, and 40,000 episodes gets it to 87% rather than 98%.
+**This is the mirror image of the Snake result** — the same two methods, dead
+even there, are far apart here, and which one wins is decided by the shape of
+the reward rather than by anything intrinsic to either.
+
+The GA also **saturates almost immediately** against a random opponent:
+
+| generation | 1    | 2    | 3    | 4    | … | 25   |
+|------------|------|------|------|------|---|------|
+| holdout    | 0.82 | 0.94 | 1.00 | 0.99 | … | 1.00 |
+
+Once a candidate beats random every time there is no fitness signal left, and
+the remaining 22 generations optimise noise. Anything better has to be selected
+against a stronger opponent (`--opponent ga`), which is what `--opponent` is for.
+
+**Kuhn poker**, 40,000 hands, seats rotated. Chips per hand, which is the unit
+that means something here:
+
+| matchup       | chips/hand | 95% CI             | win rate |
+|---------------|------------|--------------------|----------|
+| `ga` v random | +0.4532    | +0.4379 … +0.4684  | 68.7%    |
+| `dqn` v random| +0.3765    | +0.3618 … +0.3912  | 64.7%    |
+| `ga` v `dqn`  | +0.0942    | +0.0780 … +0.1104  | 58.7%    |
+
+The GA beats the DQN by about a tenth of a chip a hand, and the interval clears
+zero comfortably. Two caveats that make this game worth having:
+
+**There is an exact answer to check against.** Kuhn is small enough to solve on
+paper: against perfect play the first player loses **1/18 ≈ 0.056 chips a hand**.
+Every other result in this repo is one model measured against another model of
+unknown strength; this is the only one with a known optimum behind it.
+
+**And 1/18 is brutally expensive to measure.** A hand pays out ±1 or ±2, so the
+per-hand standard deviation is about 1.6 — roughly thirty times the edge being
+measured. Resolving a 1/18 difference at 95% takes **about 3,000 hands**, and
+that is for a gap the size of the entire game value. It is the cheapest available
+demonstration of the thing this whole bench is about.
+
+Neither agent can actually reach the optimum, and that is a property of the
+agents rather than of the training. Kuhn's optimal strategy is *mixed* — it
+bluffs the jack at a specific frequency — and a `WeightedAgent` with fixed
+weights is deterministic, so no weight vector reaches it. `temperature` on that
+agent is what buys the randomisation back.
 
 ## Parameter sweeps
 
@@ -172,16 +235,72 @@ first thing to suspect when a from-scratch net will not learn.
   feature set, not selection precision. Reported rather than quietly dropped,
   because a bench that only records its wins is not much of a bench.
 
-## Adding a game
+## The game interface
 
-Implement `core.game.Game` and add it to `_games()` in `core/registry.py`. You
-need `reset`, `legal_actions`, `step`, `is_terminal`, `scores`, `observe`,
-`render`, and `action_features`. Both trainers, the arena, the viewer and every
-chart then work on it unchanged.
+Every game is a `core.game.Game`. Add it to `_games()` in `core/registry.py` and
+both trainers, the arena, the viewer and every chart work on it unchanged.
 
-Two rules that will bite otherwise: states must be immutable, since the runner
-keeps old ones for replay; and `action_features` / `observe` must return exactly
-as many values as `feature_names` / `obs_size` declare (there is a test for this).
+**Simultaneous games** — 2048, Snake — implement `reset`, `legal_actions`,
+`step`, `is_terminal`, `scores`, `observe`, `render` and `action_features`.
+`step` takes one action per player and advances a tick.
+
+**Turn-based games** — Connect Four, Kuhn poker — subclass `TurnBasedGame` and
+implement `current_player`, `moves` and `play`, each phrased for the single
+player to move. The action-tuple plumbing is handled for you: seats that are not
+to move pass `NO_ACTION`, so from the outside a turn-based game is just one where
+all but one seat has no legal action. That is why nothing downstream needed a
+special case.
+
+**Hidden information** is expressed by `view(state, player)`, which returns what
+that player is allowed to know. The runner hands agents the *view*, never the
+state, so a poker agent cannot physically read its opponent's card. The contract
+that makes this work: every method an agent can reach — `legal_actions`,
+`action_features`, `observe` — must accept a view as well as a full state, and
+give the same answer on both. Perfect-information games return the state
+unchanged and pay nothing. `tests/test_turn_based.py` checks all of it.
+
+Three rules that will bite otherwise: states must be immutable, since the runner
+keeps old ones for replay; `action_features` / `observe` must return exactly as
+many values as `feature_names` / `obs_size` declare; and `render` is the
+*spectator* view, built only for finished replays, so it may reveal what `view`
+hides.
+
+### What turn-based games broke
+
+Worth recording, because none of it was visible until a real turn-based game
+existed:
+
+- **The DQN collector was storing one transition per tick.** In a turn-based
+  game the opponent moves in between, so the position a learner bootstraps from
+  is not the next tick — it is its own next decision. Worse, in Connect Four the
+  reward for losing arrives on the *opponent's* ply, so a per-tick collector
+  attributed it to nobody and the learner never saw a defeat at all.
+  `collect_episode` now spans decision to decision, accumulating reward across
+  the plies in between. Simultaneous games are unaffected, because there the two
+  are the same thing — there is a test pinning that.
+- **The arena's confidence intervals were lying.** See below.
+
+## Deterministic games break the error bars
+
+Connect Four has no chance in it. Two saved models are deterministic. So every
+seed produces *the same game*, and 4,000 games are two games recorded 2,000
+times each:
+
+```
+connect4: 200 games, seats rotated
+  ga                 win 100.0%  [98.1%, 100.0%]   mean score       1.0
+  dqn                win   0.0%  [ 0.0%,  1.9%]   mean score      -1.0
+
+  WARNING: every seed produced the same game. Neither the game nor the agents
+  have any randomness in them, so this is 2 distinct match(es) repeated, not
+  200 samples. Ignore the interval above [...]
+```
+
+That `[98.1%, 100.0%]` is computed from a sample size of two. The arena now
+detects the case — every seating yielding a single outcome across all its seeds —
+and says so rather than printing a confident number. It stays quiet when either
+the game deals cards or an agent randomises, which is the whole point: this is
+the one situation where common random numbers buy you nothing at all.
 
 ## Design notes
 
@@ -191,6 +310,14 @@ as many values as `feature_names` / `obs_size` declare (there is a test for this
   regardless of length, and entering a cell a tail is vacating is survivable
   unless that snake just ate. Snakes starve after 100 foodless ticks so two
   cautious agents cannot circle forever.
+- Connect Four precomputes all 69 four-in-a-row windows, so threat counting is a
+  flat sweep rather than nested bounds checks. Scores are zero-sum and
+  terminal-only: +1/-1, and 0 each for a draw, which `winners` reports as a tie
+  and the arena splits half a win each way.
+- Kuhn poker is the two-action formulation: `pass` is a check when nothing is
+  owed and a fold when facing a bet, `bet` is a bet or a call. `view` blanks the
+  opponent's card, and `scores` is only ever called on the true state — a view
+  is missing a card and could not settle a showdown.
 - The viewer is stdlib `http.server` bound to localhost, and reads `models/` on
   every request — train something new and it shows up on refresh.
 - Illegal actions are masked, never penalised: a model must not be able to pick

@@ -117,15 +117,43 @@ def compare(game_name, agent_names, games=200, seed_offset=1_000_000,
         record.median_score = statistics.median(record.scores)
 
     if not quiet:
-        _report(game_name, results, agent_names, games, multiplayer)
+        _report(game_name, results, agent_names, games, multiplayer, raw)
     return results
 
 
-def _report(game_name, results, agent_names, games, multiplayer):
+def _distinct_matchups(raw):
+    """Number of genuinely different games played, or None if the count is
+    healthy.
+
+    A game with no chance in it, played by agents that are deterministic, gives
+    the same episode every time: the seeds change nothing, so N games are one
+    game recorded N times. The win rate is then either 0% or 100% and the
+    interval around it is nonsense, because the samples are not independent.
+    This catches exactly that case -- every seating producing a single outcome
+    across all of its seeds -- and stays quiet otherwise.
+    """
+    outcomes = {(seating, tuple(scores)) for seating, scores, _ in raw}
+    seatings = {seating for seating, _, _ in raw}
+    if len(outcomes) == len(seatings) and len(raw) > len(seatings):
+        return len(seatings)
+    return None
+
+
+def _report(game_name, results, agent_names, games, multiplayer, raw=()):
     label = "games each" if not multiplayer else "games, seats rotated"
     print(f"\n{game_name}: {games} {label}")
     for name in agent_names:
         print(results[name].line(multiplayer))
+
+    distinct = _distinct_matchups(raw)
+    if distinct is not None:
+        print(
+            f"\n  WARNING: every seed produced the same game. Neither the game "
+            f"nor the agents have any randomness in them, so this is {distinct} "
+            f"distinct match(es) repeated, not {len(raw)} samples. Ignore the "
+            f"interval above -- vary the agents (a WeightedAgent temperature, "
+            f"or DQN epsilon) if you want a distribution to measure."
+        )
 
     if not multiplayer and len(agent_names) == 2:
         a, b = (results[n] for n in agent_names)

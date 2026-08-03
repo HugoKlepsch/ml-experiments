@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import traceback
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from core.game import SIMULTANEOUS
 from core.registry import list_agents, list_games, load_agent, make_game
 from core.runner import play_episode
 
@@ -27,9 +29,10 @@ def describe_game(name):
     return {
         "name": name,
         "default_players": game.num_players,
-        # Snake seats an arbitrary number of players; 2048 is fixed at one.
+        # Snake seats an arbitrary number of players; every other game is fixed.
         "variable_players": name == "snake",
-        "max_players": 8 if name == "snake" else 1,
+        "max_players": 8 if name == "snake" else game.num_players,
+        "turn_based": game.current_player(game.reset(random.Random(0))) != SIMULTANEOUS,
         "actions": list(game.action_names),
         "features": list(game.feature_names),
     }

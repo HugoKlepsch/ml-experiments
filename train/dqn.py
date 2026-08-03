@@ -20,9 +20,8 @@ from types import SimpleNamespace
 import numpy as np
 
 from agents.dqn import DQNAgent, MLP, ReplayBuffer, huber_grad
-from core.game import NO_ACTION
 from core.registry import load_agent, make_game, save_model
-from core.runner import play_episode
+from core.runner import play_episode, poll
 
 # Defined once and shared by the CLI and `train_dqn`, so the two cannot drift.
 DEFAULTS = {
@@ -62,42 +61,50 @@ def train_dqn(game, **overrides):
 
 
 def collect_episode(game, learner, opponent_name, seed, buffer, seat):
-    """Play one episode, storing the learner's transitions. Returns its score."""
+    """Play one episode, storing the learner's transitions. Returns its score.
+
+    Transitions run **from one of the learner's decisions to its next one**, not
+    from tick to tick. In a simultaneous game those are the same thing and this
+    is the textbook loop. In a turn-based game they are not: the opponent moves
+    in between, so the state the learner bootstraps from has to be the position
+    it actually faces next, and the reward has to be everything that accrued
+    while it was not on move. Storing per-tick instead would have the learner
+    bootstrapping from positions where it is not even to move, and in Connect
+    Four -- where the only reward is the final one, and it lands on the
+    *opponent's* ply when they win -- it would never see a loss at all.
+    """
     rng = random.Random(seed)
-    agents = [None] * game.num_players
-    for i in range(game.num_players):
-        agents[i] = learner if i == seat else load_agent(game.name, opponent_name)
-    agent_rng = random.Random(seed * 7919)
+    agents = [learner if i == seat else load_agent(game.name, opponent_name)
+              for i in range(game.num_players)]
+    agent_rngs = [random.Random(seed * 7919 + i) for i in range(game.num_players)]
     for agent in agents:
-        if agent is not None:
-            agent.reset()
+        agent.reset()
 
     state = game.reset(rng)
+    pending = None    # (obs, action) from the learner's last decision
+    accrued = 0.0     # reward since that decision
+
     while not game.is_terminal(state):
         options = game.legal_actions(state, seat)
-        if not options:
-            break
-        obs = game.observe(state, seat)
-        action = learner.act(game, state, seat, agent_rng)
-
-        actions = []
-        for i, agent in enumerate(agents):
-            if i == seat:
-                actions.append(action)
-            elif game.legal_actions(state, i):
-                actions.append(agent.act(game, state, i, agent_rng))
-            else:
-                actions.append(NO_ACTION)
+        actions = poll(game, agents, state, agent_rngs)
+        if options:
+            # A decision point: close out the previous one, then open this one.
+            obs = game.observe(game.view(state, seat), seat)
+            if pending is not None:
+                buffer.add(*pending, accrued, obs, False, options)
+            pending, accrued = (obs, actions[seat]), 0.0
 
         next_state = game.step(state, tuple(actions), rng)
-        reward = game.reward(state, next_state, seat)
-        done = game.is_terminal(next_state) or not game.alive(next_state, seat)
-        legal_next = [] if done else game.legal_actions(next_state, seat)
-        buffer.add(obs, action, reward, game.observe(next_state, seat), done, legal_next)
-
+        accrued += game.reward(state, next_state, seat)
         state = next_state
-        if done:
+
+        if not game.alive(state, seat):
             break
+
+    if pending is not None:
+        # The episode ended without the learner moving again, so there is
+        # nothing to bootstrap from: `done` zeroes the bootstrap term.
+        buffer.add(*pending, accrued, game.observe(game.view(state, seat), seat), True, [])
     return game.scores(state)[seat]
 
 

@@ -243,7 +243,6 @@ async function runMatch() {
     $("scrub").max = match.frames.length - 1;
     ["back","play","fwd","scrub"].forEach(id => $(id).disabled = false);
     showFrame(0);
-    renderStats();
     $("status").textContent =
       `${match.steps} steps` + (match.truncated ? " (frames sampled for display)" : "");
   } catch (err) {
@@ -254,14 +253,20 @@ async function runMatch() {
   }
 }
 
-function renderStats() {
+const DECIMALS = { snake: 2, kuhn: 0, connect4: 0 };
+
+function renderStats(f) {
+  const last = frame === match.frames.length - 1;
   $("stats").innerHTML = match.agents.map((name, i) => {
-    const won = match.winners.includes(i);
+    // Only call anyone a winner once the replay has reached the end.
+    const won = last && match.winners.includes(i);
     const label = match.agents.length > 1 ? `seat ${i} · ${name}` : name;
-    return `<div class="stat${won ? " win" : ""}">
-      <div class="k">${label}${won ? " · winner" : ""}</div>
+    const tag = won ? " · winner" : (f.to_move === i ? " · to move" : "");
+    const score = (f.scores ? f.scores[i] : match.scores[i]);
+    return `<div class="stat${won || f.to_move === i ? " win" : ""}">
+      <div class="k">${label}${tag}</div>
       <div class="v" style="color:${PALETTE[i % PALETTE.length]}">
-        ${match.scores[i].toFixed(match.game === "snake" ? 2 : 0)}</div>
+        ${score.toFixed(DECIMALS[match.game] ?? 0)}</div>
     </div>`;
   }).join("");
 }
@@ -293,6 +298,7 @@ function showFrame(index) {
   frame = Math.max(0, Math.min(index, match.frames.length - 1));
   $("scrub").value = frame;
   draw(match.frames[frame]);
+  renderStats(match.frames[frame]);
 }
 
 // ---- drawing -----------------------------------------------------------
@@ -307,6 +313,83 @@ function draw(f) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (f.kind === "grid2048") drawGrid2048(f);
   else if (f.kind === "snake") drawSnake(f);
+  else if (f.kind === "connect4") drawConnect4(f);
+  else if (f.kind === "kuhn") drawKuhn(f);
+}
+
+function drawConnect4(f) {
+  const size = canvas.width, pad = 8;
+  const cell = (size - pad * (f.width + 1)) / f.width;
+  const boardH = cell * f.height + pad * (f.height + 1);
+  const top = (canvas.height - boardH) / 2;
+
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent");
+  ctx.globalAlpha = 0.18;
+  roundRect(0, top, size, boardH, 12); ctx.fill();
+  ctx.globalAlpha = 1;
+
+  const winning = new Set(f.line || []);
+  for (let i = 0; i < f.width * f.height; i++) {
+    const r = Math.floor(i / f.width), c = i % f.width;
+    const x = pad + c * (cell + pad) + cell / 2;
+    const y = top + pad + r * (cell + pad) + cell / 2;
+    const owner = f.cells[i];   // 0 empty, else seat + 1
+    ctx.fillStyle = owner
+      ? PALETTE[(owner - 1) % PALETTE.length]
+      : getComputedStyle(document.documentElement).getPropertyValue("--cell");
+    ctx.beginPath();
+    ctx.arc(x, y, cell * 0.44, 0, Math.PI * 2);
+    ctx.fill();
+
+    // The four that ended it, and the piece just played, are worth picking out.
+    if (winning.has(i) || i === f.last) {
+      ctx.strokeStyle = winning.has(i) ? "#f2c744" : "rgba(255,255,255,0.9)";
+      ctx.lineWidth = winning.has(i) ? 4 : 2;
+      ctx.beginPath();
+      ctx.arc(x, y, cell * 0.44, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawKuhn(f) {
+  const w = canvas.width, mid = canvas.height / 2;
+  const cardW = 96, cardH = 136;
+  const ink = getComputedStyle(document.documentElement).getPropertyValue("--ink");
+  const muted = getComputedStyle(document.documentElement).getPropertyValue("--muted");
+  ctx.textAlign = "center";
+
+  f.cards.forEach((card, i) => {
+    const x = w * (i === 0 ? 0.28 : 0.72) - cardW / 2;
+    const y = mid - cardH / 2;
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--panel");
+    roundRect(x, y, cardW, cardH, 10); ctx.fill();
+    ctx.strokeStyle = PALETTE[i % PALETTE.length];
+    ctx.lineWidth = 3;
+    roundRect(x, y, cardW, cardH, 10); ctx.stroke();
+
+    // Concealed while the hand was live; solid once it went to showdown.
+    ctx.globalAlpha = f.private ? 0.4 : 1;
+    ctx.fillStyle = ink;
+    ctx.font = "600 56px ui-sans-serif, system-ui, sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.fillText(card, x + cardW / 2, y + cardH / 2);
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = muted;
+    ctx.font = "13px ui-sans-serif, system-ui, sans-serif";
+    ctx.fillText(`seat ${i} · in ${f.committed[i]}`, x + cardW / 2, y + cardH + 20);
+  });
+
+  ctx.fillStyle = muted;
+  ctx.font = "13px ui-sans-serif, system-ui, sans-serif";
+  ctx.fillText(f.private ? "cards face down" : "showdown", w / 2, mid - cardH / 2 - 34);
+  ctx.fillStyle = ink;
+  ctx.font = "600 22px ui-sans-serif, system-ui, sans-serif";
+  ctx.fillText(`pot ${f.pot}`, w / 2, mid);
+  ctx.fillStyle = muted;
+  ctx.font = "14px ui-sans-serif, system-ui, sans-serif";
+  ctx.fillText(f.history.join(" → ") || "no action yet", w / 2, mid + cardH / 2 + 26);
 }
 
 function drawGrid2048(f) {
