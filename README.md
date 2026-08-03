@@ -9,10 +9,45 @@ The recurring theme, and the reason the arena and the notebook exist at all:
 model is better than another.** Game outcomes are noisy enough that a plausible
 gap usually turns out to be luck.
 
+## Setup
+
+```bash
+source setup.bash
+```
+
+That is the whole thing. It creates `.venv` if missing, installs
+`requirements.txt` when it has changed, and activates the environment. Source it
+again any time — the common case does no work and returns in a few milliseconds.
+From cold it takes about twenty seconds.
+
+It must be **sourced, not executed**, since it changes your current shell. It
+refuses to run any other way, and it deliberately avoids `set -e` and `exit` so
+that a failure never closes your terminal.
+
+Once active, `python` is the venv's, and `PYTHONPATH` includes the repo root so
+the commands below work from any directory. Leave with `deactivate`.
+
+## Quickstart
+
+```bash
+source setup.bash
+
+python -m unittest discover -s tests -t .        # 55 tests
+
+python -m train.ga 2048 --name ga                # evolve 2048 weights
+python -m train.ga snake --players 2 --name ga   # evolve snake weights
+python -m train.dqn snake --players 2 --name dqn # train a snake DQN
+
+python -m core.arena snake ga dqn --games 6000   # compare
+python serve.py                                  # viewer on :8000
+cd notebooks && jupyter lab                      # charts
+```
+
 ## Layout
 
 | path                        | what it is                                                                       |
 |-----------------------------|----------------------------------------------------------------------------------|
+| `setup.bash`                | sourced environment setup — venv, requirements, `PYTHONPATH`                     |
 | `core/game.py`              | the `Game` interface — N simultaneous players, per-action features, observations |
 | `core/agent.py`             | `Agent` interface, random/first baselines, and the GA-trained `WeightedAgent`    |
 | `core/runner.py`            | plays an episode, optionally recording every frame for replay                    |
@@ -26,22 +61,6 @@ gap usually turns out to be luck.
 | `serve.py` + `static/`      | browser match viewer                                                             |
 | `notebooks/analysis.ipynb`  | training curves, distributions, win rates with error bars                        |
 | `models/<game>/<name>.json` | trained models; anything here appears in the UI and arena                        |
-
-## Quickstart
-
-```bash
-python3 -m venv .venv && .venv/bin/pip install numpy matplotlib pandas jupyterlab
-
-.venv/bin/python -m unittest discover -s tests -t .        # 55 tests
-
-.venv/bin/python -m train.ga 2048 --name ga                # evolve 2048 weights
-.venv/bin/python -m train.ga snake --players 2 --name ga   # evolve snake weights
-.venv/bin/python -m train.dqn snake --players 2 --name dqn # train a snake DQN
-
-.venv/bin/python -m core.arena snake ga dqn --games 6000   # compare
-.venv/bin/python serve.py                                  # viewer on :8000
-cd notebooks && ../.venv/bin/python -m jupyter lab         # charts
-```
 
 ## Results
 

@@ -1,0 +1,6 @@
+# Everything the games, trainers and arena need is stdlib. These are only for
+# the DQN's linear algebra and for the analysis notebook.
+numpy>=2.0
+matplotlib>=3.9
+pandas>=2.2
+jupyterlab>=4.2
