@@ -11,10 +11,11 @@ Q-values upward — a few extra characters here remove that.
 from __future__ import annotations
 
 import argparse
-import json
+import multiprocessing
 import random
 import statistics
 import time
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -22,6 +23,42 @@ from agents.dqn import DQNAgent, MLP, ReplayBuffer, huber_grad
 from core.game import NO_ACTION
 from core.registry import load_agent, make_game, save_model
 from core.runner import play_episode
+
+# Defined once and shared by the CLI and `train_dqn`, so the two cannot drift.
+DEFAULTS = {
+    "name": "dqn",
+    "players": None,
+    "opponent": "random",
+    "episodes": 4000,
+    "hidden": 128,
+    "lr": 7e-4,
+    "gamma": 0.95,
+    "batch": 64,
+    "buffer": 100_000,
+    "warmup": 1_000,
+    "updates_per_episode": 8,
+    "target_sync": 500,
+    "epsilon_start": 1.0,
+    "epsilon_end": 0.05,
+    "explore_fraction": 0.5,
+    "eval_every": 200,
+    "eval_games": 30,
+    "seed": 0,
+    "save": True,
+    "sweep": False,
+    "quiet": False,
+}
+
+
+def train_dqn(game, **overrides):
+    """Programmatic entry point. Returns a result dict; see `run`.
+
+    Keyword names match the CLI flags with dashes turned into underscores.
+    """
+    unknown = set(overrides) - set(DEFAULTS)
+    if unknown:
+        raise TypeError(f"unknown parameter(s): {sorted(unknown)}")
+    return run(SimpleNamespace(game=game, **{**DEFAULTS, **overrides}))
 
 
 def collect_episode(game, learner, opponent_name, seed, buffer, seat):
@@ -154,45 +191,55 @@ def run(args):
                 "loss": statistics.fmean(losses) if losses else None,
                 "buffer": buffer.size,
             })
-            print(
-                f"ep {episode:6d}  eps {learner.epsilon:.3f}  "
-                f"loss {statistics.fmean(losses) if losses else float('nan'):8.3f}  "
-                f"eval {mean_score:9.1f}  [{time.time() - started:5.0f}s]",
-                flush=True,
-            )
+            if not args.quiet:
+                print(
+                    f"ep {episode:6d}  eps {learner.epsilon:.3f}  "
+                    f"loss {statistics.fmean(losses) if losses else float('nan'):8.3f}  "
+                    f"eval {mean_score:9.1f}  [{time.time() - started:5.0f}s]",
+                    flush=True,
+                )
 
     learner.epsilon = 0.0
-    path = save_model(args.game, args.name, {
+    payload = {
         **learner.to_payload(),
         "config": vars(args),
         "history": history,
-    })
-    print(f"\nwrote {path}")
-    return history
+    }
+    path = None
+    if args.save:
+        path = save_model(args.game, args.name, payload, sweep=args.sweep)
+        if not args.quiet:
+            print(f"\nwrote {path}")
+
+    return {
+        "name": args.name,
+        "game": args.game,
+        "eval_score": history[-1]["eval_score"] if history else float("nan"),
+        "best_eval": max((h["eval_score"] for h in history), default=float("nan")),
+        "history": history,
+        "path": str(path) if path else None,
+        "seconds": time.time() - started,
+        "config": vars(args),
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("game")
-    parser.add_argument("--name", default="dqn")
-    parser.add_argument("--players", type=int, default=None)
-    parser.add_argument("--opponent", default="random")
-    parser.add_argument("--episodes", type=int, default=4000)
-    parser.add_argument("--hidden", type=int, default=128)
-    parser.add_argument("--lr", type=float, default=7e-4)
-    parser.add_argument("--gamma", type=float, default=0.95)
-    parser.add_argument("--batch", type=int, default=64)
-    parser.add_argument("--buffer", type=int, default=100_000)
-    parser.add_argument("--warmup", type=int, default=1_000)
-    parser.add_argument("--updates-per-episode", type=int, default=8)
-    parser.add_argument("--target-sync", type=int, default=500)
-    parser.add_argument("--epsilon-start", type=float, default=1.0)
-    parser.add_argument("--epsilon-end", type=float, default=0.05)
-    parser.add_argument("--explore-fraction", type=float, default=0.5)
-    parser.add_argument("--eval-every", type=int, default=200)
-    parser.add_argument("--eval-games", type=int, default=30)
-    parser.add_argument("--seed", type=int, default=0)
-    run(parser.parse_args())
+    for flag, default in DEFAULTS.items():
+        if flag in ("save", "quiet"):
+            continue
+        kind = type(default) if default is not None else int
+        parser.add_argument(
+            f"--{flag.replace('_', '-')}",
+            type=kind if kind in (int, float) else str,
+            default=default,
+        )
+    parser.add_argument("--quiet", action="store_true")
+    args = parser.parse_args()
+    args.save = True
+    args.sweep = False
+    run(args)
 
 
 if __name__ == "__main__":

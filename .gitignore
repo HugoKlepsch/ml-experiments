@@ -3,3 +3,7 @@ __pycache__/
 .venv/
 .ipynb_checkpoints/
 .idea/
+
+# Sweep output: regenerated on every notebook run, and large for wide networks.
+# Curated models in models/<game>/ are committed; these are not.
+models/*/sweeps/

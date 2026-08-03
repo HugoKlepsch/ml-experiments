@@ -17,15 +17,48 @@ Three things here matter more than the GA itself:
 from __future__ import annotations
 
 import argparse
-import json
 import multiprocessing
 import random
 import statistics
 import time
+from types import SimpleNamespace
 
 from core.agent import WeightedAgent
 from core.registry import load_agent, make_game, save_model
 from core.runner import play_episode
+
+# Defined once and shared by the CLI and `train_ga`, so the two cannot drift.
+DEFAULTS = {
+    "name": "ga",
+    "players": None,
+    "opponent": "random",
+    "population": 40,
+    "generations": 30,
+    "games": 12,
+    "games_end": 60,
+    "holdout_games": 40,
+    "elites": 4,
+    "tournament": 3,
+    "sigma": 0.35,
+    "sigma_decay": 0.97,
+    "mutation_rate": 0.3,
+    "workers": multiprocessing.cpu_count(),
+    "seed": 0,
+    "save": True,
+    "sweep": False,
+    "quiet": False,
+}
+
+
+def train_ga(game, **overrides):
+    """Programmatic entry point. Returns a result dict; see `run`.
+
+    Keyword names match the CLI flags with dashes turned into underscores.
+    """
+    unknown = set(overrides) - set(DEFAULTS)
+    if unknown:
+        raise TypeError(f"unknown parameter(s): {sorted(unknown)}")
+    return run(SimpleNamespace(game=game, **{**DEFAULTS, **overrides}))
 
 
 def _fitness(job):
@@ -120,12 +153,13 @@ def run(args):
                 "holdout": holdout_fitness,
                 "weights": list(best),
             })
-            print(
-                f"gen {generation:3d}  n={budget:4d}  "
-                f"best {best_fitness:9.1f}  mean {statistics.fmean(fitnesses):9.1f}  "
-                f"holdout {holdout_fitness:9.1f}  [{time.time() - started:5.0f}s]",
-                flush=True,
-            )
+            if not args.quiet:
+                print(
+                    f"gen {generation:3d}  n={budget:4d}  "
+                    f"best {best_fitness:9.1f}  mean {statistics.fmean(fitnesses):9.1f}  "
+                    f"holdout {holdout_fitness:9.1f}  [{time.time() - started:5.0f}s]",
+                    flush=True,
+                )
 
             survivors = [ind for _, ind in ranked[: args.elites]]
             sigma = args.sigma * (args.sigma_decay ** (generation - 1))
@@ -140,11 +174,12 @@ def run(args):
             pool.join()
 
     champion = max(history, key=lambda h: h["holdout"])
-    print(f"\nbest holdout {champion['holdout']:.1f} at generation {champion['generation']}")
-    for name, weight in zip(game.feature_names, champion["weights"]):
-        print(f"  {name:<14} {weight:+.3f}")
+    if not args.quiet:
+        print(f"\nbest holdout {champion['holdout']:.1f} at generation {champion['generation']}")
+        for name, weight in zip(game.feature_names, champion["weights"]):
+            print(f"  {name:<14} {weight:+.3f}")
 
-    path = save_model(args.game, args.name, {
+    payload = {
         "kind": "weighted",
         "weights": champion["weights"],
         "feature_names": list(game.feature_names),
@@ -152,33 +187,51 @@ def run(args):
         "generation": champion["generation"],
         "config": vars(args),
         "history": history,
-    })
-    print(f"wrote {path}")
-    return history
+    }
+    path = None
+    if args.save:
+        path = save_model(args.game, args.name, payload, sweep=args.sweep)
+        if not args.quiet:
+            print(f"wrote {path}")
+
+    return {
+        "name": args.name,
+        "game": args.game,
+        "weights": champion["weights"],
+        "holdout_score": champion["holdout"],
+        "history": history,
+        "path": str(path) if path else None,
+        "seconds": time.time() - started,
+        "config": vars(args),
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("game")
-    parser.add_argument("--name", default="ga", help="model name to save under")
-    parser.add_argument("--players", type=int, default=None)
-    parser.add_argument("--opponent", default="random",
+    parser.add_argument("--name", default=DEFAULTS["name"], help="model name to save under")
+    parser.add_argument("--players", type=int, default=DEFAULTS["players"])
+    parser.add_argument("--opponent", default=DEFAULTS["opponent"],
                         help="agent filling the other seats in multiplayer games")
-    parser.add_argument("--population", type=int, default=40)
-    parser.add_argument("--generations", type=int, default=30)
-    parser.add_argument("--games", type=int, default=12,
+    parser.add_argument("--population", type=int, default=DEFAULTS["population"])
+    parser.add_argument("--generations", type=int, default=DEFAULTS["generations"])
+    parser.add_argument("--games", type=int, default=DEFAULTS["games"],
                         help="games per individual in generation 1")
-    parser.add_argument("--games-end", type=int, default=60,
+    parser.add_argument("--games-end", type=int, default=DEFAULTS["games_end"],
                         help="games per individual in the final generation")
-    parser.add_argument("--holdout-games", type=int, default=40)
-    parser.add_argument("--elites", type=int, default=4)
-    parser.add_argument("--tournament", type=int, default=3)
-    parser.add_argument("--sigma", type=float, default=0.35)
-    parser.add_argument("--sigma-decay", type=float, default=0.97)
-    parser.add_argument("--mutation-rate", type=float, default=0.3)
-    parser.add_argument("--workers", type=int, default=multiprocessing.cpu_count())
-    parser.add_argument("--seed", type=int, default=0)
-    run(parser.parse_args())
+    parser.add_argument("--holdout-games", type=int, default=DEFAULTS["holdout_games"])
+    parser.add_argument("--elites", type=int, default=DEFAULTS["elites"])
+    parser.add_argument("--tournament", type=int, default=DEFAULTS["tournament"])
+    parser.add_argument("--sigma", type=float, default=DEFAULTS["sigma"])
+    parser.add_argument("--sigma-decay", type=float, default=DEFAULTS["sigma_decay"])
+    parser.add_argument("--mutation-rate", type=float, default=DEFAULTS["mutation_rate"])
+    parser.add_argument("--workers", type=int, default=DEFAULTS["workers"])
+    parser.add_argument("--seed", type=int, default=DEFAULTS["seed"])
+    parser.add_argument("--quiet", action="store_true")
+    args = parser.parse_args()
+    args.save = True
+    args.sweep = False
+    run(args)
 
 
 if __name__ == "__main__":

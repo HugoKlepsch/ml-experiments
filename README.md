@@ -40,7 +40,16 @@ python -m train.dqn snake --players 2 --name dqn # train a snake DQN
 
 python -m core.arena snake ga dqn --games 6000   # compare
 python serve.py                                  # viewer on :8000
-cd notebooks && jupyter lab                      # charts
+cd notebooks && jupyter lab                      # charts and sweeps
+```
+
+Sweeping a parameter, from a notebook or the REPL:
+
+```python
+from train.sweep import sweep, round_robin
+sweep("dqn", "snake", "hidden", [16, 32, 64, 128, 256], players=2)
+sweep("ga",  "snake", "opponent", ["random", "ga", "dqn"], players=2)
+round_robin("snake", ["ga", "dqn", "random"], games=2000)
 ```
 
 ## Layout
@@ -58,9 +67,12 @@ cd notebooks && jupyter lab                      # charts
 | `agents/dqn.py`             | MLP + replay buffer, backward pass written out in numpy                          |
 | `train/ga.py`               | genetic algorithm — works on any game                                            |
 | `train/dqn.py`              | Double DQN — works on any game                                                   |
+| `train/sweep.py`            | vary one parameter, retrain, measure — plus round-robin                          |
 | `serve.py` + `static/`      | browser match viewer                                                             |
 | `notebooks/analysis.ipynb`  | training curves, distributions, win rates with error bars                        |
-| `models/<game>/<name>.json` | trained models; anything here appears in the UI and arena                        |
+| `notebooks/sweeps.ipynb`    | parameter sweeps read against a seed-noise floor                                 |
+| `models/<game>/<name>.json` | curated models, committed; anything here appears in the UI and arena             |
+| `models/<game>/sweeps/`     | sweep output — discoverable the same way, but gitignored                         |
 
 ## Results
 
@@ -99,6 +111,35 @@ That two completely different approaches — seven hand-written features tuned b
 evolution, and a neural network learning its own value function from raw
 observations — land in a dead heat is a real finding about the difficulty of the
 game, not a failure of either method.
+
+## Parameter sweeps
+
+`notebooks/sweeps.ipynb` retrains a model while varying one parameter and measures
+the result. Its organising idea is that **a sweep is unreadable without a noise
+floor**: two runs differing only in random seed also produce different numbers, so
+you need to know that spread before believing any of the others.
+
+Sweeping the DQN's hidden width on Snake (2,500 episodes, 300 games per measurement):
+
+| hidden | mean score | verdict against the noise floor        |
+|--------|------------|----------------------------------------|
+| 16     | 4.16       | inside — indistinguishable from a seed |
+| 32     | 5.54       | inside — indistinguishable from a seed |
+| 64     | 10.11      | inside — indistinguishable from a seed |
+| 128    | 22.05      | **above — plausibly a real gain**      |
+| 256    | 22.52      | **above — plausibly a real gain**      |
+
+That looks like a clean monotonic curve. But five runs at a *fixed* `hidden=64`,
+differing only by seed, scored 3.79, 10.11, 11.04, 15.03 and 15.54 — a spread of
+11.75 against a sweep spread of 18.36. Only the top two settings clear it. The
+apparent difference between 16, 32 and 64 is seed luck.
+
+Doing this properly means k seeds per setting at k times the cost, which is exactly
+why so many published sweeps report one run per cell.
+
+The GA opponent sweep — does training against a harder opponent help? — came back
+negative: scored against a common `random` opponent, training against `random`,
+`ga` and `dqn` gave 23.66, 23.90 and 23.22, with fully overlapping intervals.
 
 ## The two model families
 

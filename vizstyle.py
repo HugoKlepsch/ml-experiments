@@ -25,6 +25,12 @@ GRID = "#e6e5e0"
 # Fixed categorical order. Slot 1 blue, 2 orange, 3 aqua, 4 yellow.
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
 
+# Diverging pair for polarity data — a win rate is "better or worse than even",
+# so it wants two opposed hues around a neutral midpoint, never a single ramp.
+DIVERGING_LOW = "#d03b3b"    # red: losing
+DIVERGING_MID = "#f0efec"    # neutral gray: an even match
+DIVERGING_HIGH = "#2a78d6"   # blue: winning
+
 # Stable entity -> slot mapping, so an agent keeps its colour across figures.
 _ASSIGNED = {
     "random": SERIES[3],
@@ -54,7 +60,7 @@ def use_style():
         "axes.labelcolor": INK_SOFT,
         "axes.titlecolor": INK,
         "axes.titlesize": 12,
-        "axes.titleweight": "600",
+        "axes.titleweight": "bold",  # DejaVu has no 600; asking for it warns
         "axes.titlelocation": "left",
         "axes.titlepad": 10,
         "axes.labelsize": 10,
@@ -105,3 +111,13 @@ def finish(ax, title=None, subtitle=None, xlabel=None, ylabel=None, legend=True)
 def new_figure(width=7.2, height=3.8):
     fig, ax = plt.subplots(figsize=(width, height))
     return fig, ax
+
+
+def diverging_cmap():
+    """Red → neutral → blue, centred on an even match. Use with a symmetric
+    norm around 0.5 so the midpoint really lands on 'no advantage'."""
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list(
+        "winrate", [DIVERGING_LOW, DIVERGING_MID, DIVERGING_HIGH]
+    )
