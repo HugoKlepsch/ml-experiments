@@ -2,7 +2,8 @@
 
 A small bench for training models to play games and comparing them honestly.
 Four games, two families of model, a head-to-head arena, a browser viewer, and a
-notebook. Pure stdlib except numpy/matplotlib/pandas/jupyter in a local venv.
+notebook. The games, runner, arena and GA are pure stdlib; the DQN is torch, and
+numpy/matplotlib/pandas/jupyter carry the rest, all in a local venv.
 
 The recurring theme, and the reason the arena and the notebook exist at all:
 **most of the difficulty is not training a model, it is telling whether one
@@ -68,7 +69,7 @@ round_robin("snake", ["ga", "dqn", "random"], games=2000)
 | `games/snake.py`            | Snake (N players, simultaneous)                                                  |
 | `games/connect4.py`         | Connect Four (2 players, turn-based, terminal-only reward)                       |
 | `games/kuhn.py`             | Kuhn poker (2 players, turn-based, hidden information and chance)                |
-| `agents/dqn.py`             | MLP + replay buffer, backward pass written out in numpy                          |
+| `agents/dqn.py`             | torch MLP + replay buffer, with a JSON model format the trainer and UI share      |
 | `train/ga.py`               | genetic algorithm — works on any game                                            |
 | `train/dqn.py`              | Double DQN — works on any game                                                   |
 | `train/sweep.py`            | vary one parameter, retrain, measure — plus round-robin                          |
@@ -94,22 +95,23 @@ reaches the 2048 tile in roughly a quarter of games; random play never passes 25
 
 | agent    | win rate | 95% CI        |
 |----------|----------|---------------|
-| `dqn`    | 48.5%    | 45.3% – 51.8% |
-| `ga`     | 47.0%    | 43.7% – 50.2% |
-| `random` | 4.5%     | 3.3% – 6.1%   |
+| `ga`     | 50.9%    | 47.6% – 54.2% |
+| `dqn`    | 44.9%    | 41.6% – 48.1% |
+| `random` | 4.2%     | 3.1% – 5.8%   |
 
 Both trained models crush random. Neither beats the other — and that is the most
-instructive result in the repo. At 900 games the DQN looked 3.6 points ahead. At
+instructive result in the repo. At 900 games the GA looked 6.0 points ahead. At
 6,000 games:
 
 | agent | win rate | 95% CI        |
 |-------|----------|---------------|
-| `dqn` | 50.5%    | 49.2% – 51.8% |
-| `ga`  | 49.5%    | 48.2% – 50.8% |
+| `dqn` | 50.8%    | 49.6% – 52.1% |
+| `ga`  | 49.2%    | 47.9% – 50.4% |
 
-The gap collapsed to 1.0 point and both intervals now straddle 50%. The earlier
-lead was noise. **A 3.6-point win-rate gap over 900 games is not evidence of
-anything** — resolving a difference that small takes several thousand games.
+The lead did not merely shrink, it **changed hands**: the DQN is now 1.6 points
+up, and the 900-game intervals that seemed to favour the GA were wide enough to
+contain this all along. **A 6-point win-rate gap over 900 games is not evidence
+of anything** — resolving a difference this small takes several thousand games.
 
 That two completely different approaches — seven hand-written features tuned by
 evolution, and a neural network learning its own value function from raw
@@ -121,7 +123,7 @@ game, not a failure of either method.
 | agent | win rate | 95% CI        |
 |-------|----------|---------------|
 | `ga`  | 97.9%    | 97.2% – 98.4% |
-| `dqn` | 87.3%    | 85.8% – 88.7% |
+| `dqn` | 88.9%    | 87.5% – 90.3% |
 
 Head to head the GA wins, and it wins *both* of the two games that exist between
 two deterministic agents — see the section on deterministic matchups above for
@@ -131,7 +133,7 @@ The gap is not close, and the reason is the reward. Connect Four scores 0 for
 every position until the last move, when it becomes ±1. The GA never has to
 solve that: it only needs a fitness number, and `wins_now` and `blocks_win` hand
 it most of a tactical policy for free. The DQN has to carry one terminal reward
-back across forty plies, and 40,000 episodes gets it to 87% rather than 98%.
+back across forty plies, and 40,000 episodes gets it to 89% rather than 98%.
 **This is the mirror image of the Snake result** — the same two methods, dead
 even there, are far apart here, and which one wins is decided by the shape of
 the reward rather than by anything intrinsic to either.
@@ -151,9 +153,9 @@ that means something here:
 
 | matchup       | chips/hand | 95% CI             | win rate |
 |---------------|------------|--------------------|----------|
-| `ga` v random | +0.4532    | +0.4379 … +0.4684  | 68.7%    |
-| `dqn` v random| +0.3765    | +0.3618 … +0.3912  | 64.7%    |
-| `ga` v `dqn`  | +0.0942    | +0.0780 … +0.1104  | 58.7%    |
+| `ga` v random | +0.4708    | +0.4556 … +0.4860  | 69.1%    |
+| `dqn` v random| +0.3459    | +0.3316 … +0.3602  | 60.8%    |
+| `ga` v `dqn`  | +0.0895    | +0.0733 … +0.1057  | 58.5%    |
 
 The GA beats the DQN by about a tenth of a chip a hand, and the interval clears
 zero comfortably. Two caveats that make this game worth having:
@@ -186,23 +188,25 @@ Sweeping the DQN's hidden width on Snake (2,500 episodes, 300 games per measurem
 
 | hidden | mean score | verdict against the noise floor        |
 |--------|------------|----------------------------------------|
-| 16     | 4.16       | inside — indistinguishable from a seed |
-| 32     | 5.54       | inside — indistinguishable from a seed |
-| 64     | 10.11      | inside — indistinguishable from a seed |
-| 128    | 22.05      | **above — plausibly a real gain**      |
-| 256    | 22.52      | **above — plausibly a real gain**      |
+| 16     | 2.61       | **below — plausibly a real loss**      |
+| 32     | 4.62       | inside — indistinguishable from a seed |
+| 64     | 12.84      | inside — indistinguishable from a seed |
+| 128    | 22.28      | **above — plausibly a real gain**      |
+| 256    | 22.58      | **above — plausibly a real gain**      |
 
 That looks like a clean monotonic curve. But five runs at a *fixed* `hidden=64`,
-differing only by seed, scored 3.79, 10.11, 11.04, 15.03 and 15.54 — a spread of
-11.75 against a sweep spread of 18.36. Only the top two settings clear it. The
-apparent difference between 16, 32 and 64 is seed luck.
+differing only by seed, scored 4.42, 9.23, 12.34, 12.84 and 18.52 — a spread of
+14.10 against a sweep spread of 19.97. Three of the five settings separate from
+that band — 16 below it, 128 and 256 above — and 32 and 64 sit inside it, so the
+apparent step between those two is seed luck. Note what that costs: a five-point
+sweep resolved into three groups, not five.
 
 Doing this properly means k seeds per setting at k times the cost, which is exactly
 why so many published sweeps report one run per cell.
 
 The GA opponent sweep — does training against a harder opponent help? — came back
 negative: scored against a common `random` opponent, training against `random`,
-`ga` and `dqn` gave 23.66, 23.90 and 23.22, with fully overlapping intervals.
+`ga` and `dqn` gave 23.66, 23.90 and 21.58, with fully overlapping intervals.
 
 ## The two model families
 
@@ -212,9 +216,16 @@ interpret, and limited by the quality of the features you thought of.
 
 **`DQNAgent`.** Learns a value for each action from the raw observation vector,
 via Double DQN with a replay buffer and a target network. No feature engineering,
-but far more hyperparameters and much harder to debug. `tests/test_core.py`
-checks the hand-written backward pass against finite differences, which is the
-first thing to suspect when a from-scratch net will not learn.
+but far more hyperparameters and much harder to debug. The network is an
+`nn.Module` wrapping an `nn.Sequential`, so torch owns the layers, the autograd
+and the optimiser, and `train/dqn.py` is left holding only the DQN logic —
+targets, action masking, bootstrapping — which is the part worth reading.
+
+Models are JSON, not `torch.save` output: the `state_dict` goes to disk as
+nested lists next to the config and the training history the notebooks plot.
+One readable, diffable format for every model in `models/`, GA and DQN alike,
+and `core/registry.py` does not need to know which kind a file is until it opens
+it.
 
 ## Practices baked in
 

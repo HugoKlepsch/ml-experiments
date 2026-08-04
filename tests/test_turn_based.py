@@ -346,7 +346,7 @@ class TestTurnBasedCollection(unittest.TestCase):
 
     def collect(self, game_name, episodes=40, seat=0):
         game = make_game(game_name)
-        agent = DQNAgent(MLP([game.obs_size, 8, game.num_actions], seed=0), epsilon=0.5)
+        agent = DQNAgent(MLP([game.obs_size, 8, game.num_actions]), epsilon=0.5)
         buffer = ReplayBuffer(4096, game.obs_size, seed=0)
         scores = [
             collect_episode(game, agent, "random", seed, buffer, seat)
@@ -358,7 +358,7 @@ class TestTurnBasedCollection(unittest.TestCase):
         """Connect Four alternates, so a learner that made k moves must leave
         exactly k transitions -- not one per ply of the whole game."""
         game = make_game("connect4")
-        agent = DQNAgent(MLP([game.obs_size, 8, game.num_actions], seed=0))
+        agent = DQNAgent(MLP([game.obs_size, 8, game.num_actions]))
         buffer = ReplayBuffer(256, game.obs_size, seed=0)
         collect_episode(game, agent, "random", 1, buffer, seat=0)
 
@@ -382,7 +382,7 @@ class TestTurnBasedCollection(unittest.TestCase):
         for name in ("connect4", "kuhn"):
             with self.subTest(game=name):
                 game = make_game(name)
-                agent = DQNAgent(MLP([game.obs_size, 8, game.num_actions], seed=0))
+                agent = DQNAgent(MLP([game.obs_size, 8, game.num_actions]))
                 for seed in range(15):
                     buffer = ReplayBuffer(256, game.obs_size, seed=0)
                     score = collect_episode(game, agent, "random", seed, buffer, 0)
@@ -393,7 +393,7 @@ class TestTurnBasedCollection(unittest.TestCase):
         for name in ("connect4", "kuhn"):
             with self.subTest(game=name):
                 game = make_game(name)
-                agent = DQNAgent(MLP([game.obs_size, 8, game.num_actions], seed=0))
+                agent = DQNAgent(MLP([game.obs_size, 8, game.num_actions]))
                 buffer = ReplayBuffer(256, game.obs_size, seed=0)
                 collect_episode(game, agent, "random", 4, buffer, 0)
                 done = buffer.done[: buffer.size]
@@ -404,7 +404,7 @@ class TestTurnBasedCollection(unittest.TestCase):
         """2048 decides on every tick, so decisions and ticks coincide and the
         collector must still store one transition per step."""
         game = make_game("2048")
-        agent = DQNAgent(MLP([game.obs_size, 8, game.num_actions], seed=0))
+        agent = DQNAgent(MLP([game.obs_size, 8, game.num_actions]))
         buffer = ReplayBuffer(100_000, game.obs_size, seed=0)
         collect_episode(game, agent, "random", 2, buffer, seat=0)
         episode = play_episode(game, [agent], 2)

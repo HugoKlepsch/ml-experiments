@@ -1,14 +1,17 @@
-"""Tests for the runner, agents, arena statistics and the DQN's backward pass."""
+"""Tests for the runner, agents, arena statistics and the DQN's network."""
 
+import json
 import random
 import unittest
 
-import numpy as np
+import torch
+import torch.nn.functional as F
+from torch import nn
 
-from agents.dqn import MLP, DQNAgent, ReplayBuffer, huber_grad
+from agents.dqn import MLP, DQNAgent, ReplayBuffer
 from core.agent import RandomAgent, WeightedAgent
 from core.arena import wilson_interval
-from core.registry import list_agents, list_games, load_agent, make_game
+from core.registry import find_model, list_agents, list_games, load_agent, make_game
 from core.runner import play_episode
 
 
@@ -109,61 +112,82 @@ class TestWilson(unittest.TestCase):
 
 
 class TestNetwork(unittest.TestCase):
-    def test_backprop_matches_numerical_gradients(self):
-        """The hand-written backward pass is the likeliest thing to be wrong,
-        so check it against finite differences."""
-        rng = np.random.default_rng(0)
-        net = MLP([5, 7, 4], seed=1)
-        x = rng.normal(size=(6, 5))
-        target = rng.normal(size=(6, 4))
+    def test_every_parameter_receives_a_gradient(self):
+        """Autograd does the differentiating, so the thing worth checking is that
+        the graph reaches all of it -- a detached tensor or a layer left out of
+        the optimiser trains silently and badly."""
+        net = MLP([5, 7, 4])
+        x = torch.randn(6, 5)
+        target = torch.randn(6, 4)
 
-        def loss_of(net_):
-            return float(((net_.predict(x) - target) ** 2).sum())
+        ((net(x) - target) ** 2).mean().backward()
+        for name, param in net.named_parameters():
+            self.assertIsNotNone(param.grad, msg=f"{name} got no gradient")
+            self.assertGreater(float(param.grad.abs().sum()), 0.0, msg=name)
 
-        out, cache = net.forward(x)
-        analytic = net.backward(cache, 2.0 * (out - target))
-
-        eps = 1e-6
-        for index, param in enumerate(net.weights + net.biases):
-            flat = param.reshape(-1)
-            probe = min(3, flat.size)
-            for k in range(probe):
-                original = flat[k]
-                flat[k] = original + eps
-                high = loss_of(net)
-                flat[k] = original - eps
-                low = loss_of(net)
-                flat[k] = original
-                numeric = (high - low) / (2 * eps)
-                self.assertAlmostEqual(
-                    numeric, analytic[index].reshape(-1)[k], places=4,
-                    msg=f"gradient mismatch at param {index} element {k}",
-                )
+    def test_head_is_linear(self):
+        """A ReLU on the output would floor every Q-value at zero, which quietly
+        breaks any game with negative rewards -- Kuhn poker loses chips."""
+        net = MLP([4, 8, 3])
+        self.assertIsInstance(net.net[-1], nn.Linear)
+        with torch.no_grad():
+            # Drive the head to a known negative value; a trailing ReLU would
+            # clamp it to 0.
+            net.net[-1].weight.zero_()
+            net.net[-1].bias.fill_(-1.0)
+            torch.testing.assert_close(net(torch.randn(2, 4)), torch.full((2, 3), -1.0))
 
     def test_network_can_fit_a_tiny_dataset(self):
-        net = MLP([3, 16, 2], seed=0)
-        x = np.array([[1.0, 0, 0], [0, 1.0, 0], [0, 0, 1.0]])
-        y = np.array([[1.0, -1.0], [-1.0, 1.0], [0.5, 0.5]])
-        first = float(((net.predict(x) - y) ** 2).mean())
+        net = MLP([3, 16, 2])
+        opt = torch.optim.Adam(net.parameters(), lr=0.02)
+        x = torch.eye(3)
+        y = torch.tensor([[1.0, -1.0], [-1.0, 1.0], [0.5, 0.5]])
+        with torch.no_grad():
+            first = float(((net(x) - y) ** 2).mean())
         for _ in range(400):
-            out, cache = net.forward(x)
-            net.adam_step(net.backward(cache, 2.0 * (out - y) / len(x)), lr=0.02)
-        self.assertLess(float(((net.predict(x) - y) ** 2).mean()), first * 0.05)
+            opt.zero_grad(set_to_none=True)
+            ((net(x) - y) ** 2).mean().backward()
+            opt.step()
+        with torch.no_grad():
+            self.assertLess(float(((net(x) - y) ** 2).mean()), first * 0.05)
 
     def test_huber_gradient_is_clipped(self):
-        grad = huber_grad(np.array([0.5, 10.0, -10.0]), np.zeros(3))
-        np.testing.assert_allclose(grad, [0.5, 1.0, -1.0])
+        """The training step relies on smooth_l1_loss having beta=1, i.e. on its
+        gradient being the residual clipped to [-1, 1]."""
+        predicted = torch.tensor([0.5, 10.0, -10.0], requires_grad=True)
+        F.smooth_l1_loss(predicted, torch.zeros(3), reduction="sum").backward()
+        torch.testing.assert_close(predicted.grad, torch.tensor([0.5, 1.0, -1.0]))
 
     def test_round_trip_through_json_preserves_predictions(self):
-        net = MLP([4, 8, 3], seed=2)
+        net = MLP([4, 8, 3])
         agent = DQNAgent(net, name="x")
-        restored = DQNAgent.from_payload(agent.to_payload(), name="x")
-        x = np.random.default_rng(0).normal(size=(2, 4))
-        np.testing.assert_allclose(net.predict(x), restored.net.predict(x))
+        payload = json.loads(json.dumps(agent.to_payload()))  # as it hits disk
+        restored = DQNAgent.from_payload(payload, name="x")
+        x = torch.randn(2, 4)
+        with torch.no_grad():
+            torch.testing.assert_close(net(x), restored.net(x))
+
+    def test_committed_models_load(self):
+        """models/ is committed and the arena numbers in the README come from it,
+        so a change to the payload layout has to be caught here, not by someone
+        wondering why a trained model suddenly plays like it is untrained."""
+        loaded = 0
+        for game_name in list_games():
+            game = make_game(game_name)
+            for name in list_agents(game_name):
+                path = find_model(game_name, name)
+                if path is None or json.loads(path.read_text()).get("kind") != "dqn":
+                    continue
+                agent = load_agent(game_name, name)
+                with torch.no_grad():
+                    q = agent.net(torch.zeros(1, game.obs_size))
+                self.assertEqual(tuple(q.shape), (1, game.num_actions))
+                loaded += 1
+        self.assertGreater(loaded, 0, "no committed DQN models found to check")
 
     def test_dqn_masks_illegal_actions(self):
         game = make_game("snake", num_players=1)
-        agent = DQNAgent(MLP([game.obs_size, 8, 4], seed=3))
+        agent = DQNAgent(MLP([game.obs_size, 8, 4]))
         state = game.reset(random.Random(0))
         for _ in range(30):
             if game.is_terminal(state):

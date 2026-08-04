@@ -1,96 +1,60 @@
-"""A DQN written directly in numpy, backward pass included.
-
-Torch would be fewer lines, but the whole point of this project is to see how
-the model works. The network here is small enough that hand-written backprop is
-readable and fast, and swapping in torch later only touches this file.
+"""A DQN built on torch.
 
 Architecture: MLP with ReLU hidden layers and a linear head producing one
 Q-value per action. Trained with Huber loss, Adam, a target network and a
-uniform replay buffer.
+uniform replay buffer -- the training loop itself lives in `train/dqn.py`.
+
+Model files are JSON rather than `torch.save` output, holding the module's
+`state_dict` as nested lists alongside the config and training history the
+notebooks plot. That keeps every model in `models/` -- GA and DQN alike -- one
+readable, diffable format that `core/registry.py` can load without knowing which
+kind it is until it reads the file.
 """
 
 from __future__ import annotations
 
 import numpy as np
+import torch
+from torch import nn
 
 from core.agent import Agent
 from core.game import NO_ACTION
 
+# The arena and the sweeps fan out over a process pool, and each worker would
+# otherwise start its own set of intra-op threads: on a 16-core box that is 256
+# threads fighting over 128x128 matmuls. One thread per process is both faster
+# here and avoids the well-known torch-threadpool-across-fork hang.
+torch.set_num_threads(1)
 
-class MLP:
-    """Fully connected net with ReLU hidden layers and a linear output."""
 
-    def __init__(self, sizes, seed=0):
-        rng = np.random.default_rng(seed)
+class MLP(nn.Module):
+    """Fully connected net with ReLU hidden layers and a linear output.
+
+    `sizes` is [obs, hidden..., actions]; any depth works.
+    """
+
+    def __init__(self, sizes):
+        super().__init__()
         self.sizes = list(sizes)
-        self.weights = [
-            # He initialisation: variance 2/fan_in keeps ReLU activations from
-            # collapsing toward zero as depth grows.
-            rng.normal(0.0, np.sqrt(2.0 / a), size=(a, b))
-            for a, b in zip(sizes, sizes[1:])
-        ]
-        self.biases = [np.zeros(b) for b in sizes[1:]]
-        self._m = [np.zeros_like(p) for p in self.weights + self.biases]
-        self._v = [np.zeros_like(p) for p in self.weights + self.biases]
-        self._t = 0
+
+        layers = []
+        for a, b in zip(sizes, sizes[1:]):
+            layers += [nn.Linear(a, b), nn.ReLU()]
+        self.net = nn.Sequential(*layers[:-1])  # the head is linear, so drop its ReLU
+
+        for layer in self.net:
+            if isinstance(layer, nn.Linear):
+                # He initialisation: variance 2/fan_in keeps ReLU activations
+                # from collapsing toward zero as depth grows.
+                nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
+                nn.init.zeros_(layer.bias)
 
     def forward(self, x):
-        """Returns (output, cache). `x` has shape (batch, in)."""
-        activations = [x]
-        pre = []
-        last = len(self.weights) - 1
-        for i, (w, b) in enumerate(zip(self.weights, self.biases)):
-            z = activations[-1] @ w + b
-            pre.append(z)
-            activations.append(z if i == last else np.maximum(z, 0.0))
-        return activations[-1], (activations, pre)
+        return self.net(x)
 
-    def predict(self, x):
-        return self.forward(x)[0]
-
-    def backward(self, cache, d_out):
-        """Gradients for a loss whose derivative w.r.t. the output is `d_out`."""
-        activations, pre = cache
-        grads_w = [None] * len(self.weights)
-        grads_b = [None] * len(self.biases)
-        delta = d_out
-        for i in reversed(range(len(self.weights))):
-            grads_w[i] = activations[i].T @ delta
-            grads_b[i] = delta.sum(axis=0)
-            if i > 0:
-                delta = (delta @ self.weights[i].T) * (pre[i - 1] > 0)
-        return grads_w + grads_b
-
-    def adam_step(self, grads, lr=1e-3, beta1=0.9, beta2=0.999, eps=1e-8, clip=10.0):
-        params = self.weights + self.biases
-        self._t += 1
-        for i, (param, grad) in enumerate(zip(params, grads)):
-            norm = np.linalg.norm(grad)
-            if norm > clip:
-                grad = grad * (clip / norm)
-            self._m[i] = beta1 * self._m[i] + (1 - beta1) * grad
-            self._v[i] = beta2 * self._v[i] + (1 - beta2) * grad * grad
-            m_hat = self._m[i] / (1 - beta1 ** self._t)
-            v_hat = self._v[i] / (1 - beta2 ** self._t)
-            param -= lr * m_hat / (np.sqrt(v_hat) + eps)
-
-    def copy_from(self, other):
-        self.weights = [w.copy() for w in other.weights]
-        self.biases = [b.copy() for b in other.biases]
-
-    def to_lists(self):
-        return {
-            "sizes": self.sizes,
-            "weights": [w.tolist() for w in self.weights],
-            "biases": [b.tolist() for b in self.biases],
-        }
-
-    @classmethod
-    def from_lists(cls, payload):
-        net = cls(payload["sizes"])
-        net.weights = [np.array(w, dtype=float) for w in payload["weights"]]
-        net.biases = [np.array(b, dtype=float) for b in payload["biases"]]
-        return net
+    @property
+    def device(self):
+        return next(self.parameters()).device
 
 
 class DQNAgent(Agent):
@@ -106,9 +70,11 @@ class DQNAgent(Agent):
         self.name = name
         self.epsilon = epsilon
 
+    @torch.no_grad()
     def q_values(self, game, state, player):
-        obs = np.asarray(game.observe(state, player), dtype=float)[None, :]
-        return self.net.predict(obs)[0]
+        obs = torch.tensor(game.observe(state, player), dtype=torch.float32,
+                           device=self.net.device)
+        return self.net(obs.unsqueeze(0))[0].tolist()
 
     def act(self, game, state, player, rng):
         options = game.legal_actions(state, player)
@@ -122,11 +88,21 @@ class DQNAgent(Agent):
         return max(options, key=lambda a: q[a])
 
     def to_payload(self):
-        return {"kind": self.kind, "net": self.net.to_lists()}
+        return {
+            "kind": self.kind,
+            "sizes": self.net.sizes,
+            "state_dict": {k: v.tolist() for k, v in self.net.state_dict().items()},
+        }
 
     @classmethod
     def from_payload(cls, payload, name="dqn"):
-        return cls(MLP.from_lists(payload["net"]), name=name)
+        net = MLP(payload["sizes"])
+        net.load_state_dict({
+            k: torch.tensor(v, dtype=torch.float32)
+            for k, v in payload["state_dict"].items()
+        })
+        net.eval()
+        return cls(net, name=name)
 
 
 class ReplayBuffer:
@@ -135,6 +111,10 @@ class ReplayBuffer:
     Breaking the correlation between consecutive frames is the point: training
     on a trajectory in order makes the updates wildly non-independent and the
     network chases its own tail.
+
+    Kept in numpy rather than as a preallocated tensor because it is written one
+    row at a time from the collector and only ever read a batch at a time; the
+    copy to torch happens once per update, in `train_step`.
     """
 
     def __init__(self, capacity, obs_size, seed=0):
@@ -168,13 +148,3 @@ class ReplayBuffer:
             self.obs[idx], self.actions[idx], self.rewards[idx],
             self.next_obs[idx], self.done[idx], self.legal[idx],
         )
-
-
-def huber_grad(predicted, target, delta=1.0):
-    """d/dpred of Huber loss: linear near zero, clipped past `delta`.
-
-    Clipping matters here because early Q-targets are wildly wrong, and squared
-    error on those produces updates large enough to destabilise training.
-    """
-    diff = predicted - target
-    return np.clip(diff, -delta, delta)

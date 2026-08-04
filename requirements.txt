@@ -1,5 +1,13 @@
-# Everything the games, trainers and arena need is stdlib. These are only for
-# the DQN's linear algebra and for the analysis notebook.
+# The games, the runner, the arena and the GA are pure stdlib. torch is only for
+# the DQN, numpy for the replay buffer, and the rest for the analysis notebook.
+#
+# This pulls the default PyPI wheel, which bundles the CUDA runtime and is a
+# ~2.5GB download. Nothing in the bench needs a GPU -- the nets are far too
+# small to pay one back, and `--device cpu` is the default -- so if the download
+# is a problem, swap this for the CPU build:
+#     --extra-index-url https://download.pytorch.org/whl/cpu
+#     torch==2.13.0+cpu
+torch>=2.9
 numpy>=2.0
 matplotlib>=3.9
 pandas>=2.2

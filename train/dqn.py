@@ -11,17 +11,22 @@ Q-values upward — a few extra characters here remove that.
 from __future__ import annotations
 
 import argparse
-import multiprocessing
 import random
 import statistics
 import time
 from types import SimpleNamespace
 
-import numpy as np
+import torch
+import torch.nn.functional as F
+from torch import nn
 
-from agents.dqn import DQNAgent, MLP, ReplayBuffer, huber_grad
+from agents.dqn import DQNAgent, MLP, ReplayBuffer
 from core.registry import load_agent, make_game, save_model
 from core.runner import play_episode, poll
+
+# Gradient-norm clip. Early Q-targets are wild, and an unclipped step off one
+# can undo a lot of training.
+CLIP = 10.0
 
 # Defined once and shared by the CLI and `train_dqn`, so the two cannot drift.
 DEFAULTS = {
@@ -43,6 +48,10 @@ DEFAULTS = {
     "eval_every": 200,
     "eval_games": 30,
     "seed": 0,
+    # These nets are far too small to pay back a GPU: at batch 64 over a
+    # 128-wide MLP, kernel launch overhead dominates the arithmetic. Set
+    # --device cuda only if you have grown the network enough to matter.
+    "device": "cpu",
     "save": True,
     "sweep": False,
     "quiet": False,
@@ -108,30 +117,37 @@ def collect_episode(game, learner, opponent_name, seed, buffer, seat):
     return game.scores(state)[seat]
 
 
-def train_step(net, target, buffer, batch_size, gamma, lr, n_actions):
+def train_step(net, target, opt, buffer, batch_size, gamma, n_actions):
     obs, actions, rewards, next_obs, done, legal = buffer.sample(batch_size)
-    legal = legal[:, :n_actions]
+    # The buffer already stores each column in the dtype torch wants, so these
+    # are plain copies onto the device.
+    obs, actions, rewards, next_obs, done = (
+        torch.as_tensor(x, device=net.device)
+        for x in (obs, actions, rewards, next_obs, done)
+    )
+    legal = torch.as_tensor(legal[:, :n_actions], device=net.device)
 
-    # Double DQN: online net chooses, target net values.
-    online_next = net.predict(next_obs)
-    online_next = np.where(legal, online_next, -np.inf)
-    best = online_next.argmax(axis=1)
-    target_next = target.predict(next_obs)
-    bootstrap = target_next[np.arange(len(best)), best]
-    # A state with no legal follow-up contributes nothing beyond its reward.
-    bootstrap = np.where(legal.any(axis=1), bootstrap, 0.0)
+    with torch.no_grad():
+        # Double DQN: online net chooses, target net values.
+        online_next = net(next_obs).masked_fill(~legal, -torch.inf)
+        best = online_next.argmax(dim=1, keepdim=True)
+        bootstrap = target(next_obs).gather(1, best).squeeze(1)
+        # A state with no legal follow-up contributes nothing beyond its reward.
+        bootstrap = torch.where(legal.any(dim=1), bootstrap, 0.0)
+        targets = rewards + gamma * (1.0 - done) * bootstrap
 
-    targets = rewards + gamma * (1.0 - done) * bootstrap
+    predicted = net(obs).gather(1, actions[:, None]).squeeze(1)
+    # smooth_l1_loss at the default beta=1 is the Huber loss: linear near zero,
+    # clipped past 1. The clipping matters because early Q-targets are wildly
+    # wrong, and squared error on those produces updates large enough to
+    # destabilise training.
+    loss = F.smooth_l1_loss(predicted, targets)
 
-    q, cache = net.forward(obs)
-    rows = np.arange(len(actions))
-    predicted = q[rows, actions]
-    grad = huber_grad(predicted, targets) / len(actions)
-
-    d_out = np.zeros_like(q)
-    d_out[rows, actions] = grad
-    net.adam_step(net.backward(cache, d_out), lr=lr)
-    return float(np.abs(predicted - targets).mean())
+    opt.zero_grad(set_to_none=True)
+    loss.backward()
+    nn.utils.clip_grad_norm_(net.parameters(), CLIP)
+    opt.step()
+    return float((predicted.detach() - targets).abs().mean())
 
 
 def evaluate(game, agent, opponent_name, seeds):
@@ -154,9 +170,12 @@ def run(args):
     game_kwargs = {"num_players": args.players} if args.players else {}
     game = make_game(args.game, **game_kwargs)
 
-    net = MLP([game.obs_size, args.hidden, args.hidden, game.num_actions], seed=args.seed)
-    target = MLP([game.obs_size, args.hidden, args.hidden, game.num_actions], seed=args.seed)
-    target.copy_from(net)
+    torch.manual_seed(args.seed)
+    sizes = [game.obs_size, args.hidden, args.hidden, game.num_actions]
+    net = MLP(sizes).to(args.device)
+    target = MLP(sizes).to(args.device)
+    target.load_state_dict(net.state_dict())
+    opt = torch.optim.Adam(net.parameters(), lr=args.lr)
 
     learner = DQNAgent(net, name=args.name, epsilon=args.epsilon_start)
     buffer = ReplayBuffer(args.buffer, game.obs_size, seed=args.seed)
@@ -181,12 +200,12 @@ def run(args):
         if buffer.size >= args.warmup:
             for _ in range(args.updates_per_episode):
                 losses.append(train_step(
-                    net, target, buffer, args.batch, args.gamma, args.lr,
+                    net, target, opt, buffer, args.batch, args.gamma,
                     game.num_actions,
                 ))
                 updates += 1
                 if updates % args.target_sync == 0:
-                    target.copy_from(net)
+                    target.load_state_dict(net.state_dict())
 
         if episode % args.eval_every == 0 or episode == args.episodes:
             mean_score = evaluate(game, learner, args.opponent, eval_seeds)
