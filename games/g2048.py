@@ -209,7 +209,7 @@ class Game2048(Game):
             _merges(board) / 8.0,
         )
 
-    def observe(self, state, player=0):
+    def observe(self, state, player=0, encoding=None):
         peak = max(state.board) or 1
         return [t / 16.0 for t in state.board] + [
             sum(1 for t in state.board if not t) / CELLS,

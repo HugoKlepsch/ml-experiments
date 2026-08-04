@@ -41,6 +41,11 @@ python -m train.dqn snake --players 2 --name dqn # train a snake DQN
 python -m train.ga connect4 --name ga            # turn-based, terminal reward
 python -m train.dqn kuhn --name dqn              # turn-based, hidden information
 
+# n-step returns, and the raw board through a conv net on the GPU
+python -m train.dqn snake --players 2 --n-step 3 --name dqn-n3
+python -m train.dqn snake --players 2 --encoding planes --device cuda \
+    --batch 256 --buffer 30000 --n-step 3 --envs 64 --name dqn-conv
+
 python -m core.arena snake ga dqn --games 6000   # compare
 python serve.py                                  # viewer on :8000
 cd notebooks && jupyter lab                      # charts and sweeps
@@ -69,13 +74,14 @@ round_robin("snake", ["ga", "dqn", "random"], games=2000)
 | `games/snake.py`            | Snake (N players, simultaneous)                                                  |
 | `games/connect4.py`         | Connect Four (2 players, turn-based, terminal-only reward)                       |
 | `games/kuhn.py`             | Kuhn poker (2 players, turn-based, hidden information and chance)                |
-| `agents/dqn.py`             | torch MLP + replay buffer, with a JSON model format the trainer and UI share      |
+| `agents/dqn.py`             | torch MLP and conv net + replay buffer, with a JSON model format the UI shares    |
 | `train/ga.py`               | genetic algorithm — works on any game                                            |
 | `train/dqn.py`              | Double DQN — works on any game                                                   |
 | `train/sweep.py`            | vary one parameter, retrain, measure — plus round-robin                          |
 | `serve.py` + `static/`      | browser match viewer                                                             |
 | `notebooks/analysis.ipynb`  | training curves, distributions, win rates with error bars                        |
 | `notebooks/sweeps.ipynb`    | parameter sweeps read against a seed-noise floor                                 |
+| `notebooks/optimize.ipynb`  | n-step, flat vs. conv, capacity, vectorised collection, and where the clock goes |
 | `models/<game>/<name>.json` | curated models, committed; anything here appears in the UI and arena             |
 | `models/<game>/sweeps/`     | sweep output — discoverable the same way, but gitignored                         |
 
@@ -208,6 +214,62 @@ The GA opponent sweep — does training against a harder opponent help? — came
 negative: scored against a common `random` opponent, training against `random`,
 `ga` and `dqn` gave 23.66, 23.90 and 21.58, with fully overlapping intervals.
 
+`notebooks/optimize.ipynb` does the same for n-step and the conv encoding, and
+both came back negative on Snake at a 1,500-episode budget. Reported here for the
+same reason as the ramp above:
+
+**n-step** (1,500 episodes, 300 games per measurement, seed band 11.60–18.03):
+
+| n_step | mean score | verdict                                   |
+|--------|------------|-------------------------------------------|
+| 1      | 18.03      | inside the band                           |
+| 2      | 18.46      | above it by 0.43, on a band 6.43 wide     |
+| 3      | 16.93      | inside                                    |
+| 5      | 14.03      | inside, near the bottom                   |
+| 8      | 10.10      | **below — a real loss**                   |
+
+n=2 clears the band by less than a fifteenth of its width, which is not a result.
+The loss at n=8 is. That is the predicted shape with only the downside visible,
+and the reason is the game: **Snake's reward is dense.** Food, a per-tick survival
+bonus and a death penalty arrive continuously, so there is almost no delayed
+credit for n-step to rescue, while the off-policy bias is charged in full. Connect
+Four — one reward, forty plies from the opening — is where this should pay, and is
+the obvious next thing to sweep.
+
+**The conv**, same budget, everything but the encoding held constant:
+
+| encoding | params  | train  | mean score |
+|----------|---------|--------|------------|
+| `flat`   | 19,588  | 13.5s  | **21.49**  |
+| `planes` | 673,508 | 76.3s  | 4.01       |
+
+The intervals do not overlap: at this budget the conv is decisively *worse*, and
+widening it from 16 to 128 channels does nothing (4.75, 3.91, 4.79, 5.05 — all
+inside each other's error bars, at 3x the training time).
+
+This is the most useful negative result in the repo, because it is the one people
+get wrong. The flat encoding is not raw data — it is nineteen numbers that
+already encode danger, free space and food direction, distilled by someone who
+knows the game. The conv has to *rediscover* all of that from the board, and a
+few thousand episodes is nowhere near enough. **Capacity is a loan against future
+data, and it is expensive until the data arrives.** The comparison worth trusting
+is at the budget where both have converged, which is what `FAST = False` is for.
+
+The notebook also splits a training run's wall clock into collecting experience
+and updating the network, which is the measurement that says what to optimise
+next. 150 episodes:
+
+| configuration  | total  | collecting | per update |
+|----------------|--------|------------|------------|
+| `flat` / cpu   | 0.9s   | 26%        | 0.67 ms    |
+| `planes` / cpu | 233.9s | 0%         | 224.04 ms  |
+| `planes` / cuda| 8.3s   | 9%         | 8.28 ms    |
+
+The GPU turns a 4-minute conv run into an 8-second one. Note where that leaves
+the split, though: collection is **9%** of the clock, so making it free could
+only ever return another 9%. See the next section, which measures exactly that
+and finds what the arithmetic predicts.
+
 ## The two model families
 
 **`WeightedAgent` + GA.** You write the features; evolution prices them. Needs
@@ -225,7 +287,174 @@ Models are JSON, not `torch.save` output: the `state_dict` goes to disk as
 nested lists next to the config and the training history the notebooks plot.
 One readable, diffable format for every model in `models/`, GA and DQN alike,
 and `core/registry.py` does not need to know which kind a file is until it opens
-it.
+it. Each net also records an `arch` dict that is exactly its constructor
+arguments, so the loader rebuilds an MLP or a conv net without being told which
+to expect. Models written before `arch` existed still load.
+
+## Observations, architectures and n-step
+
+Three things worth separating, because calling them all "the model" hides the
+choices that matter.
+
+**The learning algorithm** — GA or DQN — is how weights get updated. **The
+architecture** is what the network is. **The observation encoding** is what it
+gets to see. All three vary independently.
+
+### n-step returns
+
+`--n-step` (1 for textbook DQN). At n=1 a transition carries one real reward and
+then starts guessing; at n=3 it carries three. The point is how fast reward
+information travels backwards. A snake that traps itself and dies ten ticks later
+learns, at n=1, only that the final state was fatal — the move that actually did
+it waits ten more rounds of bootstrapping to hear anything.
+
+The honest caveat: an n-step return is **biased off-policy**, because the
+intermediate actions came from an older, more exploratory policy and nothing
+corrects for it. The bias grows with n, so the curve improves and then turns
+back down. Where it turns is a property of the game, which is why
+`notebooks/optimize.ipynb` measures it rather than copying 3 from a paper.
+
+The window is counted in the **learner's decisions**, not ticks — the same
+choice `collect_episode` already made for one-step transitions, and what makes
+n-step mean the same thing in Connect Four as in Snake.
+
+### Observation encodings
+
+A game may offer several descriptions of the same position. `Game.encodings`
+lists them, `observe(state, player, encoding)` takes one, `obs_spec(encoding)`
+reports the resulting length and grid shape. Only Snake currently offers more
+than one:
+
+| encoding | what the network sees                                                        |
+|----------|------------------------------------------------------------------------------|
+| `flat`   | 19 hand-crafted floats — danger per direction, flood-filled free space, food vector |
+| `planes` | 8 binary 12x12 board planes, **plus the 19 flat features appended**          |
+
+Two design rules keep this from leaking everywhere. `observe` always returns a
+**flat list** whatever the encoding — a grid lays its planes out first in
+C-order and any scalars follow — so the replay buffer stays a plain 2-D array
+and only the network reshapes. And the **agent** remembers its encoding, not the
+game, so the arena builds one `SnakeGame` and a flat MLP and a conv net can sit
+down at it together.
+
+The planes are own head/body/tail, enemy head/body/tail, food, and an all-ones
+mask over the board. That last one exists because convolutions pad with zeros:
+without it a cell past the edge is indistinguishable from an empty one, and with
+it the padding itself is what marks the wall.
+
+`planes` **appends** the flat vector rather than replacing it. `free_space` is a
+flood fill over the whole board, and a three-layer tower of 3x3 filters sees a
+7-cell window — it cannot compute that however long it trains. Feeding both
+usually beats either alone.
+
+### The conv net
+
+`ConvNet` is a tower of 3x3 convolutions over the grid, a 1x1 convolution to
+squeeze channels, then a linear head that the scalar side-channel is
+concatenated into. The argument for it over a wider MLP on the same input is
+**translation equivariance**: a convolution learns "food one cell to my left"
+once, rather than once per board square.
+
+Three deliberate omissions. **No pooling** — pooling discards position, and in
+Snake position is the problem. **No normalisation layers** — BatchNorm sees
+different batch statistics in the online and target networks and makes them
+disagree for reasons unrelated to learning. And the **1x1 reduce** before
+flattening, because flattening 64 channels of a 12x12 board straight into a
+128-wide layer is 1.2M parameters, most of the net, for nothing.
+
+### On the GPU
+
+`--device cuda`. Worth knowing what it does and does not buy. One forward pass
+over a batch of 256, on an RTX 2080:
+
+| network | cpu     | cuda    | per sample, cuda |
+|---------|---------|---------|------------------|
+| MLP     | 0.09 ms | 0.03 ms | 0.12 µs          |
+| conv    | 58.8 ms | 1.29 ms | 5.1 µs           |
+
+For scale, one game step plus one observation is about 60 µs, all of it Python.
+
+The MLP is free either way — its per-sample cost is a couple of orders of
+magnitude under the environment's, so moving it to the GPU changes nothing you
+can measure, and at batch 1 the GPU is often *slower* because a kernel launch
+costs more than the arithmetic it carries. That is why `train/dqn.py` still
+defaults to `cpu`. The conv is the opposite, and its 45x only appears at a real
+batch size.
+
+The general form: **a GPU is a throughput device, so it pays only once the work
+is batchy.** The conv defaults pair `--device cuda` with `--batch 256`.
+
+A grid observation is ~60x wider than a flat one, so the replay buffer stores
+observations as float16 for grid encodings and float32 otherwise — two float32
+copies at the default 100k capacity would be 940 MB of RAM doing nothing useful.
+Observations are inputs, not parameters; half precision costs about three
+decimal digits of something already normalised to roughly [0, 1].
+
+### Vectorised collection
+
+`--envs N` plays N episodes concurrently. Nothing about the game gets faster —
+stepping N Python games costs exactly N times stepping one. What changes is that
+every agent is asked for all its pending decisions at once, so the network does
+one forward pass over N positions instead of N passes over one. At batch 1 a GPU
+spends longer launching the kernel than running it, so this is the difference
+between using the device and merely owning it.
+
+`collect_batch` groups pending decisions **by agent object, not by seat**, which
+is what makes it work under seat rotation: the learner sits in different seats in
+different episodes but is one object, so its decisions still form one batch. The
+collector also builds each observation once and hands it to the agent, rather
+than letting `act` rebuild the vector the replay buffer is about to store — worth
+as much here as the batching, since a planes observation costs about as much as a
+forward pass.
+
+`--envs` is a **pure throughput knob**: same episodes, same gradient steps, same
+replay ratio, same seat rotation. `tests/test_vectorised.py` holds it to that,
+differentially — batched collection must store exactly the transitions serial
+collection would, across all four games, every n-step setting, both net types and
+mixed seat assignments. If that property broke, `--envs` would be silently
+changing what a run learns from and every result in the repo would become
+conditional on a setting nobody thinks of as an experiment.
+
+**Collection throughput**, 256 Snake episodes, transitions per second:
+
+| envs | flat MLP / cpu | conv / cpu    | conv / cuda   |
+|------|----------------|---------------|---------------|
+| 1    | 7,799          | 2,092         | 2,821         |
+| 4    | 9,395          | 2,752         | 4,694         |
+| 16   | 10,990         | 3,281         | 6,356         |
+| 64   | 12,093 (1.55x) | 3,442 (1.65x) | 6,661         |
+| 256  | 11,942         | 3,417         | 7,531 (2.67x) |
+
+It does what it claims — 2.7x on the GPU conv, and it keeps climbing where both
+CPU variants peak early and then flatten or *decline*, since a CPU convolution at
+batch 256 is no faster per sample than at batch 1 and the extra bookkeeping is
+pure loss. That is section 1's measurement showing up from the other side.
+
+**But it barely moves total training time**, and that is the result worth
+recording. End to end on `planes`/`cuda`, 200 episodes, replay ratio held fixed:
+
+| updates/episode | envs=1 | envs=64 | speedup |
+|-----------------|--------|---------|---------|
+| 8 (default)     | 7.14s  | 7.44s   | 0.96x   |
+| 4               | 4.18s  | 3.94s   | 1.06x   |
+| 2               | 2.51s  | 2.14s   | 1.17x   |
+| 1               | 1.57s  | 1.23s   | 1.27x   |
+
+Collection was **9%** of that configuration's clock, so Amdahl caps the win near
+1.1x at the default and it comes in at 0.96x — the batching overhead is real and
+at a high replay ratio there is nothing for it to buy. **Training here is
+update-bound**, and a faster collector cannot fix that. The gain only appears
+once you stop buying eight gradient steps per episode of fresh experience.
+
+Two things it earns anyway, which the wall-clock table does not show. It makes a
+**lower replay ratio affordable** — and fewer gradient steps per fresh transition
+is usually better for final performance, not merely faster, so the bottom row of
+that table is the interesting one rather than the top. And it moves the
+bottleneck onto **pure-Python game stepping**: flat/cpu plateaus near 12,000
+transitions per second, against roughly 16,700 for one `step` plus one `observe`
+and nothing else. Getting past *that* needs Snake's dynamics reimplemented over
+batched arrays — a much larger change than this one, and worth it only if
+collection ever becomes the thing to optimise. On this evidence it is not.
 
 ## Practices baked in
 

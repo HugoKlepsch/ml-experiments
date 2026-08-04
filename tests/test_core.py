@@ -4,11 +4,12 @@ import json
 import random
 import unittest
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from agents.dqn import MLP, DQNAgent, ReplayBuffer
+from agents.dqn import ConvNet, DQNAgent, MLP, ReplayBuffer, build_net
 from core.agent import RandomAgent, WeightedAgent
 from core.arena import wilson_interval
 from core.registry import find_model, list_agents, list_games, load_agent, make_game
@@ -179,8 +180,12 @@ class TestNetwork(unittest.TestCase):
                 if path is None or json.loads(path.read_text()).get("kind") != "dqn":
                     continue
                 agent = load_agent(game_name, name)
+                # The agent's own encoding, not the game's default: a model
+                # trained on a grid takes a much wider observation, and asking
+                # the game for `obs_size` would feed it the flat one.
+                obs_size, _ = game.obs_spec(agent.encoding)
                 with torch.no_grad():
-                    q = agent.net(torch.zeros(1, game.obs_size))
+                    q = agent.net(torch.zeros(1, obs_size))
                 self.assertEqual(tuple(q.shape), (1, game.num_actions))
                 loaded += 1
         self.assertGreater(loaded, 0, "no committed DQN models found to check")
@@ -209,10 +214,35 @@ class TestReplayBuffer(unittest.TestCase):
         buffer = ReplayBuffer(16, obs_size=3)
         for i in range(16):
             buffer.add([i, 0, 1], i % 4, 1.0, [0, 1, 2], i % 2 == 0, [0, 2])
-        obs, actions, rewards, next_obs, done, legal = buffer.sample(5)
+        obs, actions, rewards, next_obs, done, legal, nsteps = buffer.sample(5)
         self.assertEqual(obs.shape, (5, 3))
         self.assertEqual(actions.shape, (5,))
         self.assertEqual(legal.shape, (5, 8))
+        self.assertEqual(nsteps.shape, (5,))
+
+    def test_nsteps_defaults_to_one(self):
+        """Anything that adds a transition without saying otherwise is doing
+        ordinary one-step DQN, and must get a bootstrap discount of gamma^1."""
+        buffer = ReplayBuffer(4, obs_size=1)
+        buffer.add([0.0], 0, 1.0, [1.0], False, [0])
+        self.assertEqual(buffer.nsteps[0], 1.0)
+
+    def test_half_precision_storage_round_trips_as_float32(self):
+        """Grid encodings store observations as float16 to fit in memory. The
+        sampler has to hand back float32 regardless, or it meets a float32
+        network and torch refuses."""
+        buffer = ReplayBuffer(4, obs_size=2, dtype=np.float16)
+        buffer.add([0.25, -0.5], 0, 1.0, [0.75, 1.0], False, [0])
+        obs, _, _, next_obs, _, _, _ = buffer.sample(1)
+        self.assertEqual(obs.dtype, np.float32)
+        self.assertEqual(next_obs.dtype, np.float32)
+        # These values are exact in float16, so the cast must be lossless.
+        np.testing.assert_allclose(obs[0], [0.25, -0.5])
+
+    def test_half_precision_buffer_is_smaller(self):
+        wide = ReplayBuffer(1000, obs_size=500, dtype=np.float32)
+        narrow = ReplayBuffer(1000, obs_size=500, dtype=np.float16)
+        self.assertLess(narrow.nbytes, wide.nbytes * 0.6)
 
 
 if __name__ == "__main__":

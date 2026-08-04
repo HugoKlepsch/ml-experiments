@@ -240,7 +240,7 @@ class Connect4Game(TurnBasedGame):
             enemy_threes / 4.0,
         )
 
-    def observe(self, state, player):
+    def observe(self, state, player, encoding=None):
         mine, theirs = self._piece(player), self._piece(1 - player)
         own_plane = [1.0 if v == mine else 0.0 for v in state.board]
         enemy_plane = [1.0 if v == theirs else 0.0 for v in state.board]

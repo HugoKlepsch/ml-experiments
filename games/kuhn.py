@@ -191,7 +191,7 @@ class KuhnGame(TurnBasedGame):
             1.0 if player == 0 else 0.0,
         )
 
-    def observe(self, state, player):
+    def observe(self, state, player, encoding=None):
         card = state.cards[player]
         card_hot = [0.0, 0.0, 0.0]
         if card is not None:

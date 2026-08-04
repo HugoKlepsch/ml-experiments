@@ -47,6 +47,16 @@ class SnakeState:
 class SnakeGame(Game):
     name = "snake"
     action_names = ("up", "down", "left", "right")
+
+    # `flat` is the hand-crafted vector; `planes` is the raw board for a conv
+    # net, with the flat vector appended to it. See `_planes`.
+    encodings = ("flat", "planes")
+    PLANE_NAMES = (
+        "my_head", "my_body", "my_tail",
+        "enemy_heads", "enemy_bodies", "enemy_tails",
+        "food", "on_board",
+    )
+
     feature_names = (
         "dies",          # this move is immediately fatal
         "eats",          # lands on food this tick
@@ -63,6 +73,16 @@ class SnakeGame(Game):
         self.num_players = num_players
         self.starve_limit = starve_limit
         self.obs_size = 4 + 4 + 4 + 2 + 3 + 2
+        # The grid, then the whole flat vector after it as a scalar channel.
+        self.planes_size = (
+            len(self.PLANE_NAMES) * self.height * self.width + self.obs_size
+        )
+
+    def obs_spec(self, encoding=None):
+        self._check_encoding(encoding)
+        if encoding == "planes":
+            return self.planes_size, (len(self.PLANE_NAMES), self.height, self.width)
+        return self.obs_size, None
 
     # --- setup ------------------------------------------------------------
 
@@ -300,7 +320,62 @@ class SnakeGame(Game):
             1.0 - centre / span,
         )
 
-    def observe(self, state, player):
+    def observe(self, state, player, encoding=None):
+        self._check_encoding(encoding)
+        flat = self._flat(state, player)
+        if encoding == "planes":
+            return self._planes(state, player) + flat
+        return flat
+
+    def _planes(self, state, player):
+        """The board itself, as binary planes, flattened in C-order.
+
+        A convolution is *translation-equivariant*: it learns "food one cell to
+        my left" once, rather than once per square. That is the whole reason to
+        hand a net the grid instead of the summary in `_flat` — and the reason
+        the summary is appended anyway, since `free_space` is a flood fill over
+        the whole board and no small stack of 3x3 filters can compute it.
+
+        Planes are ordered so that everything about the player to move comes
+        first, which makes them readable when printed and lets a net trained on
+        a 2-player board be reused on more seats without reindexing.
+        """
+        w, h = self.width, self.height
+        cells = w * h
+        grid = [0.0] * (len(self.PLANE_NAMES) * cells)
+
+        def mark(plane, cell):
+            x, y = cell
+            if 0 <= x < w and 0 <= y < h:
+                grid[plane * cells + y * w + x] = 1.0
+
+        for i in range(self.num_players):
+            # Dead snakes are off the board -- `step` stops updating their
+            # bodies and `_obstacles` ignores them, so the planes must too.
+            if not state.alive[i]:
+                continue
+            body = state.bodies[i]
+            head_plane, body_plane, tail_plane = (0, 1, 2) if i == player else (3, 4, 5)
+            mark(head_plane, body[0])
+            for cell in body[1:]:
+                mark(body_plane, cell)
+            # The tail gets its own plane because it is the one occupied cell
+            # that is usually safe to enter: it moves out of the way, unless
+            # that snake eats this tick.
+            mark(tail_plane, body[-1])
+
+        for cell in state.food:
+            mark(6, cell)
+
+        # An all-ones plane over the playable area. Convolutions pad with
+        # zeros, so without this a cell past the edge looks exactly like an
+        # empty one; with it, the padding itself is what marks the wall.
+        base = 7 * cells
+        for k in range(cells):
+            grid[base + k] = 1.0
+        return grid
+
+    def _flat(self, state, player):
         body = state.bodies[player]
         head = body[0]
         span = self.width + self.height

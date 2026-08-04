@@ -28,6 +28,21 @@ Design notes worth knowing before adding a game:
   `observe(state, player)` is a fixed-length vector describing the position and
   is what the DQN consumes, since a Q-network maps one state to all actions.
 
+* **Observation encodings.** A game may offer more than one way of describing
+  the same position — Snake has hand-crafted `flat` features and a `planes`
+  grid for a convolutional net. `encodings` lists them, `observe` takes the one
+  you want, and `obs_spec` reports the resulting length and grid shape. Two
+  rules keep this from leaking complexity everywhere:
+
+  `observe` always returns a **flat** list of floats, whatever the encoding. A
+  grid encoding lays its planes out first, in C-order, and any scalar
+  side-channel follows; only the network reshapes. That keeps the replay buffer
+  a plain 2-D array and every game that wants one encoding paying nothing.
+
+  The *agent* remembers which encoding it was trained on, not the game. So the
+  arena builds one `SnakeGame` and a flat agent and a planes agent can both sit
+  down at it.
+
 * States must be treated as immutable. `step` returns a new state. The runner
   keeps old states around for replay, so mutating in place corrupts history.
 """
@@ -50,9 +65,29 @@ class Game(ABC):
     feature_names: tuple[str, ...]
     obs_size: int
 
+    # Observation encodings this game offers. The first is the default, and for
+    # most games it is the only one.
+    encodings: tuple[str, ...] = ("flat",)
+
     @property
     def num_actions(self) -> int:
         return len(self.action_names)
+
+    def obs_spec(self, encoding=None) -> tuple[int, tuple[int, ...] | None]:
+        """`(flat length, grid shape)` for an encoding; grid shape is None if flat.
+
+        When a grid shape `(C, H, W)` is given, the first `C*H*W` entries of
+        `observe` are that grid in C-order and the remaining `length - C*H*W`
+        are scalars appended after it.
+        """
+        self._check_encoding(encoding)
+        return self.obs_size, None
+
+    def _check_encoding(self, encoding):
+        if encoding is not None and encoding not in self.encodings:
+            raise ValueError(
+                f"{self.name}: unknown encoding {encoding!r}; have {list(self.encodings)}"
+            )
 
     @abstractmethod
     def reset(self, rng):
@@ -79,8 +114,11 @@ class Game(ABC):
         """Features of taking `action`. Must match `feature_names` in length."""
 
     @abstractmethod
-    def observe(self, state, player) -> list[float]:
-        """Fixed-length observation vector of length `obs_size`."""
+    def observe(self, state, player, encoding=None) -> list[float]:
+        """Flat observation vector, of the length `obs_spec(encoding)` reports.
+
+        `encoding` defaults to the first entry of `encodings`.
+        """
 
     @abstractmethod
     def render(self, state) -> dict:

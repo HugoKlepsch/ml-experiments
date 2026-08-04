@@ -2,6 +2,12 @@
 
 An agent sees the game and the state and returns one legal action. Agents must
 be picklable so that arena and GA evaluation can run across processes.
+
+Agents are also asked for **several decisions at once** by the vectorised
+collector in `train/dqn.py`, through `act_batch`. The default implementation
+just loops, so nothing has to opt in; a neural agent overrides it to run one
+forward pass over the whole batch instead of one per position, which is the
+entire point of collecting from many environments at a time.
 """
 
 from __future__ import annotations
@@ -19,6 +25,25 @@ class Agent(ABC):
     @abstractmethod
     def act(self, game, state, player: int, rng: random.Random) -> int:
         ...
+
+    def act_batch(self, game, states, players, rngs, observations=None) -> list[int]:
+        """One action per position, for positions from *different* episodes.
+
+        Each entry has its own `rng`, so an agent must draw from `rngs[k]` for
+        row k and nothing else -- that is what keeps a batched run identical to
+        the same episodes played one at a time.
+
+        `observations` is an optional list the caller has already built (it
+        needs them for the replay buffer anyway). An agent that consumes
+        observations should use them rather than calling `observe` again;
+        building one is comparable in cost to a small forward pass.
+
+        The default loops. Override only to batch something expensive.
+        """
+        return [
+            self.act(game, state, player, rng)
+            for state, player, rng in zip(states, players, rngs)
+        ]
 
     def reset(self) -> None:
         """Called once at the start of each episode."""

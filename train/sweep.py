@@ -140,6 +140,10 @@ def sweep(kind, game, vary, values, *, base=None, prefix=None, players=None,
         else:
             row["final_eval"] = result["eval_score"]
             row["best_eval"] = result["best_eval"]
+            # Capacity is the thing a conv sweep is actually varying, so it
+            # belongs in the row rather than having to be recovered from the
+            # saved model afterwards.
+            row["params"] = result["params"]
         rows.append(row)
 
         if verbose:
